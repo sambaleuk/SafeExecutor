@@ -8,12 +8,17 @@ import type { DatabaseAdapter } from '../adapters/adapter.interface.js';
  * Strategy depends on operation type:
  *   - SELECT → EXPLAIN ANALYZE (no data change)
  *   - DML (INSERT/UPDATE/DELETE) → BEGIN → EXECUTE → capture stats → ROLLBACK
- *   - DDL (ALTER/DROP/CREATE) → EXPLAIN only (some DDL cannot be rolled back cleanly)
+ *   - DDL explainable (ALTER, CREATE) → EXPLAIN only (schema inspection)
+ *   - DDL non-explainable (TRUNCATE, DROP) → skip EXPLAIN, pass straight to Gate 4
+ *     so the approval gate can block them with a clear message
  *
  * Returns row estimates, warnings, and the query execution plan.
  */
 
-const DDL_TYPES = new Set(['ALTER', 'DROP', 'CREATE', 'TRUNCATE']);
+// PostgreSQL supports EXPLAIN for these DDL statements
+const DDL_EXPLAINABLE = new Set(['ALTER', 'CREATE']);
+// PostgreSQL does NOT support EXPLAIN for these — skip dry-run entirely
+const DDL_NON_EXPLAINABLE = new Set(['DROP', 'TRUNCATE']);
 const DML_TYPES = new Set(['INSERT', 'UPDATE', 'DELETE']);
 
 export async function runSandbox(
@@ -23,8 +28,25 @@ export async function runSandbox(
   const start = Date.now();
   const warnings: string[] = [];
 
-  if (DDL_TYPES.has(intent.type)) {
-    // DDL: we can only explain, not simulate
+  if (DDL_NON_EXPLAINABLE.has(intent.type)) {
+    // TRUNCATE / DROP: PostgreSQL does not support EXPLAIN for these statements.
+    // Return feasible=true so the pipeline advances to Gate 4 (Approval), which
+    // will block them cleanly (CRITICAL risk → auto-mode rejects).
+    warnings.push(
+      `${intent.type} cannot be dry-run — EXPLAIN is not supported for this operation. ` +
+        'Proceeding to approval gate.',
+    );
+    return {
+      feasible: true,
+      estimatedRowsAffected: -1,
+      executionPlan: 'N/A — EXPLAIN not supported for this DDL operation',
+      warnings,
+      durationMs: Date.now() - start,
+    };
+  }
+
+  if (DDL_EXPLAINABLE.has(intent.type)) {
+    // ALTER / CREATE: schema inspection via EXPLAIN
     warnings.push('DDL operations cannot be fully simulated — dry-run provides schema inspection only');
     const plan = await adapter.explainQuery(intent.raw);
     return {

@@ -74,14 +74,16 @@ const TEST_CASES: TestCase[] = [
     description: 'COUNT on user_profiles — simplest possible read',
     level: 1,
     // user_profiles has 3 real rows
+    // Fix #1 verification: SELECT rule riskLevel=LOW should now propagate correctly
     sql: 'SELECT count(*) FROM user_profiles',
     assertion: (r) =>
       r.success === true &&
       r.auditEntry.policyDecision.allowed === true &&
+      r.auditEntry.policyDecision.riskLevel === 'LOW' &&
       r.auditEntry.operation.type === 'SELECT' &&
       r.auditEntry.policyDecision.requiresDryRun === false &&
       r.auditEntry.policyDecision.requiresApproval === false,
-    assertionDescription: 'success=true, allowed=true, type=SELECT, no dry-run, no approval',
+    assertionDescription: 'success=true, allowed=true, riskLevel=LOW, type=SELECT, no dry-run, no approval',
   },
 
   {
@@ -188,33 +190,39 @@ const TEST_CASES: TestCase[] = [
 
   {
     id: '3.2',
-    description: 'TRUNCATE TABLE — CRITICAL risk, blocked before Executor',
+    description: 'TRUNCATE TABLE — CRITICAL risk, blocked at approval gate (Gate 4)',
     level: 3,
     // Matches deny-truncate (action=require_approval, CRITICAL)
-    // CRITICAL forces requiresDryRun=true → sandbox tries EXPLAIN TRUNCATE → PostgreSQL error
-    // Operation blocked (pipeline error) — never reaches the Executor
+    // Fix #2: sandbox now skips EXPLAIN for TRUNCATE and returns feasible=true,
+    // so the pipeline reaches Gate 4 where auto-mode cleanly rejects CRITICAL risk.
     sql: 'TRUNCATE TABLE accounts',
     assertion: (r) =>
       r.success === false &&
       r.executionResult === null &&
-      r.auditEntry.policyDecision.riskLevel === 'CRITICAL',
+      r.auditEntry.policyDecision.riskLevel === 'CRITICAL' &&
+      r.auditEntry.sandboxResult !== null &&
+      r.auditEntry.approvalResponse !== null &&
+      r.auditEntry.approvalResponse.status === 'rejected',
     assertionDescription:
-      'success=false, riskLevel=CRITICAL, executionResult=null (blocked)',
+      'success=false, riskLevel=CRITICAL, sandboxResult.feasible=true, approvalResponse.status=rejected, no execution',
   },
 
   {
     id: '3.3',
-    description: 'DROP TABLE — CRITICAL risk, blocked before Executor',
+    description: 'DROP TABLE — CRITICAL risk, blocked at approval gate (Gate 4)',
     level: 3,
     // Matches deny-drop (action=require_approval, CRITICAL)
-    // Same sandbox-error pattern as TRUNCATE
+    // Fix #2: same path as TRUNCATE — sandbox passes through, approval gate rejects.
     sql: 'DROP TABLE journals',
     assertion: (r) =>
       r.success === false &&
       r.executionResult === null &&
-      r.auditEntry.policyDecision.riskLevel === 'CRITICAL',
+      r.auditEntry.policyDecision.riskLevel === 'CRITICAL' &&
+      r.auditEntry.sandboxResult !== null &&
+      r.auditEntry.approvalResponse !== null &&
+      r.auditEntry.approvalResponse.status === 'rejected',
     assertionDescription:
-      'success=false, riskLevel=CRITICAL, executionResult=null (blocked)',
+      'success=false, riskLevel=CRITICAL, sandboxResult.feasible=true, approvalResponse.status=rejected, no execution',
   },
 ];
 
