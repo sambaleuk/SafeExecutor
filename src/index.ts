@@ -10,25 +10,26 @@
  *     configPath: './config/my-config.json',
  *   });
  *
- *   const result = await executor.run('DELETE FROM users WHERE id = $1', { params: [42] });
+ *   const result = await executor.run('DELETE FROM users WHERE id = $1');
  */
 
 import { SafeExecutorPipeline } from './core/pipeline.js';
 import { loadConfig, loadPolicy } from './config/loader.js';
-import { PostgresAdapter } from './adapters/postgres.js';
-import type { DatabaseAdapter } from './adapters/adapter.interface.js';
+import { SQLAdapter, PostgresAdapter } from './adapters/sql/index.js';
+import type { SafeAdapter } from './adapters/adapter.interface.js';
 import type { PipelineResult, SafeExecutorConfig, Policy } from './types/index.js';
 
 export interface SafeExecutorOptions {
   configPath: string;
   policyPath?: string;
-  adapter?: DatabaseAdapter;
+  /** Provide a custom SafeAdapter to override the default SQL adapter */
+  adapter?: SafeAdapter;
 }
 
 export class SafeExecutor {
   private readonly config: SafeExecutorConfig;
   private readonly policy: Policy;
-  private readonly adapter: DatabaseAdapter;
+  private readonly adapter: SafeAdapter;
   private readonly pipeline: SafeExecutorPipeline;
 
   constructor(options: SafeExecutorOptions) {
@@ -37,26 +38,24 @@ export class SafeExecutor {
     const policyPath = options.policyPath ?? this.config.policy.file;
     this.policy = loadPolicy(policyPath);
 
-    this.adapter =
-      options.adapter ??
-      this.createDefaultAdapter();
+    this.adapter = options.adapter ?? this.createDefaultAdapter();
 
     this.pipeline = new SafeExecutorPipeline(this.config, this.policy, this.adapter);
   }
 
-  async run(sql: string, requestedBy?: string): Promise<PipelineResult> {
+  async run(raw: string, requestedBy?: string): Promise<PipelineResult> {
     await this.adapter.ping();
-    return this.pipeline.run(sql, requestedBy);
+    return this.pipeline.run(raw, requestedBy);
   }
 
   async close(): Promise<void> {
     await this.adapter.close();
   }
 
-  private createDefaultAdapter(): DatabaseAdapter {
+  private createDefaultAdapter(): SafeAdapter {
     const { adapter, connectionString } = this.config.database;
     if (adapter === 'postgres') {
-      return new PostgresAdapter(connectionString);
+      return new SQLAdapter(new PostgresAdapter(connectionString));
     }
     throw new Error(
       `No built-in adapter for '${adapter}'. Pass a custom adapter via options.adapter.`,
@@ -64,19 +63,26 @@ export class SafeExecutor {
   }
 }
 
-// Re-exports for library users
+// ─── Re-exports for library users ───────────────────────────────────────────
+
 export { SafeExecutorPipeline } from './core/pipeline.js';
-export { PostgresAdapter } from './adapters/postgres.js';
+export { SQLAdapter, PostgresAdapter } from './adapters/sql/index.js';
 export { loadConfig, loadPolicy } from './config/loader.js';
-export type { DatabaseAdapter } from './adapters/adapter.interface.js';
+export { registerAdapter, getAdapter, listDomains } from './plugins/registry.js';
+
+export type { SafeAdapter, DatabaseAdapter } from './adapters/adapter.interface.js';
 export type {
   PipelineResult,
   SafeExecutorConfig,
   Policy,
   PolicyRule,
+  SafeIntent,
   ParsedIntent,
   AuditEntry,
   ExecutionResult,
+  RiskFactor,
+  Target,
+  Scope,
 } from './types/index.js';
 
 // ── Cloud Infrastructure Adapter ──────────────────────────────────────────────

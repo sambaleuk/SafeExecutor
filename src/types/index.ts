@@ -1,5 +1,9 @@
 // ─── Operation Types ────────────────────────────────────────────────────────
 
+/**
+ * SQL-specific operation types (used by current policy rules).
+ * Phase 1 will generalize these to domain-agnostic types (read/write/destroy/…).
+ */
 export type OperationType =
   | 'SELECT'
   | 'INSERT'
@@ -17,18 +21,87 @@ export type ApprovalStatus = 'auto_approved' | 'pending' | 'approved' | 'rejecte
 
 export type ExecutionStatus = 'success' | 'rolled_back' | 'failed' | 'dry_run';
 
-// ─── Parsed Intent ──────────────────────────────────────────────────────────
+// ─── SafeIntent v2 Types ─────────────────────────────────────────────────────
 
-export interface ParsedIntent {
-  raw: string;
+/**
+ * Scope of the operation — how many resources are targeted.
+ */
+export type Scope = 'single' | 'batch' | 'all';
+
+/**
+ * A structured reference to the primary resource being operated on.
+ */
+export interface Target {
+  /** Primary resource name (table name, file path, bucket, endpoint, etc.) */
+  name: string;
+  /** Resource type in the domain ('table', 'file', 's3_bucket', 'url', 'pipeline') */
+  type: string;
+  /** All resources touched, including secondary ones (joins, dependencies) */
+  affectedResources: string[];
+  /** Row/item count estimate (filled by sandbox layer) */
+  estimatedCount?: number;
+}
+
+/**
+ * An explicit risk signal extracted by the adapter during intent parsing.
+ * Risk factors drive policy decisions and approval routing.
+ */
+export interface RiskFactor {
+  /** Machine-readable risk code (e.g. 'NO_WHERE_CLAUSE', 'DESTRUCTIVE_OP') */
+  code: string;
+  severity: RiskLevel;
+  description: string;
+}
+
+// ─── SafeIntent ──────────────────────────────────────────────────────────────
+
+/**
+ * Universal intent format — the lingua franca between the pipeline and adapters.
+ *
+ * Every adapter (SQL, cloud, filesystem, API, CI/CD) must produce a SafeIntent.
+ * The pipeline core and policy engine only operate on SafeIntent fields.
+ *
+ * Backward-compat fields (type, tables, hasWhereClause, …) match the old
+ * ParsedIntent interface so the policy engine and approval gate work unchanged.
+ */
+export interface SafeIntent {
+  // ── Identity ──────────────────────────────────────────────────────────────
+  /** Domain identifier: 'sql', 'cloud', 'filesystem', 'api', 'cicd', … */
+  domain: string;
+  /** Operation classification (currently SQL-specific; Phase 1 makes this generic) */
   type: OperationType;
+  /** Raw, unmodified input string */
+  raw: string;
+
+  // ── Target & Scope ────────────────────────────────────────────────────────
+  target: Target;
+  scope: Scope;
+
+  // ── Risk Signals ──────────────────────────────────────────────────────────
+  /** Explicit risk factors extracted by the adapter parser */
+  riskFactors: RiskFactor[];
+
+  // ── Domain-Specific AST ───────────────────────────────────────────────────
+  /** Domain-specific parsed representation (opaque to the pipeline core) */
+  ast?: unknown;
+
+  // ── Backward-Compatible Fields (policy engine + approval gate) ────────────
+  /** All table/resource names touched (flattened from target.affectedResources) */
   tables: string[];
   hasWhereClause: boolean;
+  /** Filled by the sandbox layer after dry-run simulation */
   estimatedRowsAffected: number | null;
   isDestructive: boolean;
+  /** True if the operation could affect a massive number of rows/resources */
   isMassive: boolean;
   metadata: Record<string, unknown>;
 }
+
+/**
+ * Backward-compatibility alias.
+ * @deprecated Use SafeIntent directly. ParsedIntent will be removed in v3.
+ */
+export type ParsedIntent = SafeIntent;
 
 // ─── Policy ─────────────────────────────────────────────────────────────────
 
@@ -78,7 +151,7 @@ export interface SandboxResult {
 
 export interface ApprovalRequest {
   id: string;
-  operation: ParsedIntent;
+  operation: SafeIntent;
   riskLevel: RiskLevel;
   sandboxResult: SandboxResult | null;
   requestedAt: Date;
@@ -112,7 +185,7 @@ export interface AuditEntry {
   id: string;
   timestamp: Date;
   executor: string;
-  operation: ParsedIntent;
+  operation: SafeIntent;
   policyDecision: PolicyDecision;
   sandboxResult: SandboxResult | null;
   approvalResponse: ApprovalResponse | null;
@@ -158,7 +231,7 @@ export interface SafeExecutorConfig {
 export interface PipelineContext {
   config: SafeExecutorConfig;
   sql: string;
-  intent: ParsedIntent | null;
+  intent: SafeIntent | null;
   policyDecision: PolicyDecision | null;
   sandboxResult: SandboxResult | null;
   approvalResponse: ApprovalResponse | null;
