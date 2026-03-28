@@ -5,12 +5,25 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "safe-executor-mcp": "./dist/bin/safe-executor-mcp.js"
+  },
   "exports": {
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./mcp-server": {
+      "import": "./dist/src/mcp-server/index.js",
+      "types": "./dist/src/mcp-server/index.d.ts"
     }
   },
+  "files": [
+    "dist/",
+    "plugin/",
+    "config/",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
@@ -37,6 +50,7 @@
     "url": "git+https://github.com/sambaleuk/SafeExecutor.git"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
     "ajv": "^8.17.1",
     "node-sql-parser": "^5.4.0",
     "pg": "^8.13.1"

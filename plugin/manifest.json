@@ -1,0 +1,11 @@
+{
+  "name": "safe-executor",
+  "version": "0.1.0",
+  "description": "Safe execution guardrails for autonomous AI agents",
+  "mcp_servers": [
+    {
+      "command": "node",
+      "args": ["dist/bin/safe-executor-mcp.js"]
+    }
+  ]
+}
