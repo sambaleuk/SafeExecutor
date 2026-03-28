@@ -8,10 +8,15 @@ import type { DatabaseAdapter } from '../adapter.interface.js';
  * Strategy depends on operation type:
  *   - SELECT → EXPLAIN ANALYZE (no data change)
  *   - DML (INSERT/UPDATE/DELETE) → BEGIN → EXECUTE → capture stats → ROLLBACK
- *   - DDL (ALTER/DROP/CREATE/TRUNCATE) → EXPLAIN only (DDL cannot be rolled back cleanly)
+ *   - DDL explainable (ALTER, CREATE) → EXPLAIN only (schema inspection)
+ *   - DDL non-explainable (TRUNCATE, DROP) → skip dry-run, pass to approval gate
+ *     (PostgreSQL does not support EXPLAIN for TRUNCATE/DROP)
  */
 
-const DDL_TYPES = new Set(['ALTER', 'DROP', 'CREATE', 'TRUNCATE']);
+// PostgreSQL supports EXPLAIN for these DDL statements
+const DDL_EXPLAINABLE = new Set(['ALTER', 'CREATE']);
+// PostgreSQL does NOT support EXPLAIN for these — skip dry-run entirely
+const DDL_NON_EXPLAINABLE = new Set(['DROP', 'TRUNCATE']);
 const DML_TYPES = new Set(['INSERT', 'UPDATE', 'DELETE']);
 
 export async function runSQLSandbox(
@@ -21,7 +26,24 @@ export async function runSQLSandbox(
   const start = Date.now();
   const warnings: string[] = [];
 
-  if (DDL_TYPES.has(intent.type)) {
+  if (DDL_NON_EXPLAINABLE.has(intent.type)) {
+    // TRUNCATE / DROP: PostgreSQL does not support EXPLAIN for these statements.
+    // Return feasible=true so the pipeline advances to Gate 4 (Approval), which
+    // will block them cleanly (CRITICAL risk → auto-mode rejects).
+    warnings.push(
+      `${intent.type} cannot be dry-run — EXPLAIN is not supported for this operation. ` +
+        'Proceeding to approval gate.',
+    );
+    return {
+      feasible: true,
+      estimatedRowsAffected: -1,
+      executionPlan: 'N/A — EXPLAIN not supported for this DDL operation',
+      warnings,
+      durationMs: Date.now() - start,
+    };
+  }
+
+  if (DDL_EXPLAINABLE.has(intent.type)) {
     warnings.push('DDL operations cannot be fully simulated — dry-run provides schema inspection only');
     const plan = await db.explainQuery(intent.raw);
     return {
@@ -78,7 +100,6 @@ export async function runSQLSandbox(
 }
 
 function extractRowEstimate(explainOutput: string): number {
-  // PostgreSQL EXPLAIN ANALYZE: "rows=NNN" in the first line
   const match = explainOutput.match(/rows=(\d+)/);
   return match ? parseInt(match[1], 10) : 0;
 }
