@@ -1,0 +1,153 @@
+{
+  "version": "1.0",
+  "rules": [
+    {
+      "id": "deny-privileged-docker",
+      "description": "docker run --privileged grants full host access — unconditional deny",
+      "match": {
+        "tools": ["docker"],
+        "actions": ["run"],
+        "isPrivileged": true
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "docker --privileged is not allowed. It grants containers unrestricted host access."
+    },
+    {
+      "id": "deny-root-mount",
+      "description": "Mounting the root filesystem into a container is unconditionally forbidden",
+      "match": {
+        "tools": ["docker"],
+        "hasDangerousMount": true
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "Mounting / into a container (e.g. -v /:/host) is forbidden — it exposes the entire host filesystem."
+    },
+    {
+      "id": "deny-latest-to-production",
+      "description": "Deploying 'latest' to production without a pinned version tag is forbidden",
+      "match": {
+        "actions": ["deploy"],
+        "environments": ["production"],
+        "hasSpecificTag": false
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "Cannot deploy 'latest' tag to production. Pin to an explicit version (e.g. myapp:1.4.2)."
+    },
+    {
+      "id": "approve-deploy-production",
+      "description": "Any deployment to production requires human approval",
+      "match": {
+        "actions": ["deploy", "trigger"],
+        "environments": ["production"]
+      },
+      "action": "require_approval",
+      "riskLevel": "CRITICAL",
+      "message": "Production deployment requires explicit human approval."
+    },
+    {
+      "id": "approve-rollback-production",
+      "description": "Rollback in production requires approval — fast-track but still audited",
+      "match": {
+        "actions": ["rollback"],
+        "environments": ["production"]
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "Production rollback requires approval (fast-track eligible — document the incident)."
+    },
+    {
+      "id": "approve-force-deploy",
+      "description": "Force deployment bypasses CI gates — requires approval regardless of environment",
+      "match": {
+        "isForceDeployment": true
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "Force deployment (--force / --skip-checks) requires explicit approval. Document the reason."
+    },
+    {
+      "id": "approve-public-registry-push",
+      "description": "Pushing to a public registry makes the image world-readable",
+      "match": {
+        "actions": ["push"],
+        "isPublicRegistry": true
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "Pushing to a public registry requires approval — image will be publicly accessible."
+    },
+    {
+      "id": "dry-run-staging-deploy",
+      "description": "Staging deployments require dry-run validation",
+      "match": {
+        "actions": ["deploy", "trigger"],
+        "environments": ["staging"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "MEDIUM",
+      "message": "Staging deployment requires dry-run validation before execution."
+    },
+    {
+      "id": "dry-run-docker-push",
+      "description": "Docker push requires dry-run to validate image and tag before pushing",
+      "match": {
+        "tools": ["docker"],
+        "actions": ["push"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "MEDIUM",
+      "message": "docker push requires dry-run validation (image tag check)."
+    },
+    {
+      "id": "dry-run-docker-run",
+      "description": "Docker run requires dry-run to validate image and flags",
+      "match": {
+        "tools": ["docker"],
+        "actions": ["run"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "MEDIUM",
+      "message": "docker run requires dry-run validation."
+    },
+    {
+      "id": "auto-approve-build",
+      "description": "Build-only operations are safe and auto-approved",
+      "match": {
+        "actions": ["build", "test", "lint"]
+      },
+      "action": "allow",
+      "riskLevel": "LOW",
+      "message": "Build / test / lint operations are non-destructive — auto-approved."
+    },
+    {
+      "id": "dry-run-compose-down",
+      "description": "docker-compose down stops running services — require dry-run",
+      "match": {
+        "tools": ["docker-compose"],
+        "actions": ["compose-down"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "MEDIUM",
+      "message": "docker-compose down requires dry-run validation."
+    },
+    {
+      "id": "auto-approve-compose-up-dev",
+      "description": "docker-compose up on development / local is safe",
+      "match": {
+        "tools": ["docker-compose"],
+        "actions": ["compose-up"],
+        "environments": ["local", "development"]
+      },
+      "action": "allow",
+      "riskLevel": "LOW",
+      "message": "docker-compose up on local/dev is auto-approved."
+    }
+  ],
+  "defaults": {
+    "allowUnknown": false,
+    "defaultRiskLevel": "MEDIUM"
+  }
+}
