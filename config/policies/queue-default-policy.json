@@ -1,0 +1,128 @@
+{
+  "version": "1.0",
+  "rules": [
+    {
+      "id": "deny-purge-production",
+      "description": "Purging production queues/topics is unconditionally forbidden — use a change management process",
+      "match": {
+        "actions": ["purge"],
+        "isProduction": true
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "Purging production queues is forbidden through this tool. Use your organization's change management process."
+    },
+    {
+      "id": "deny-redis-flush",
+      "description": "FLUSHALL and FLUSHDB destroy entire Redis databases and are always denied",
+      "match": {
+        "tools": ["redis"],
+        "actions": ["purge"]
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "Redis FLUSHALL/FLUSHDB is forbidden — these commands delete all data in the Redis instance."
+    },
+    {
+      "id": "deny-delete-topic-active-consumers",
+      "description": "Deleting a topic with active consumer groups will break running applications",
+      "match": {
+        "actions": ["delete"],
+        "hasActiveConsumers": true
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "Cannot delete topic/queue with active consumer groups. Stop all consumers first."
+    },
+    {
+      "id": "approve-delete-topic-queue",
+      "description": "Deleting any topic or queue requires explicit human approval",
+      "match": {
+        "actions": ["delete"]
+      },
+      "action": "require_approval",
+      "riskLevel": "CRITICAL",
+      "message": "Topic/queue deletion is permanent and requires explicit approval."
+    },
+    {
+      "id": "approve-purge-non-production",
+      "description": "Purging non-production queues still requires approval due to data loss risk",
+      "match": {
+        "actions": ["purge"]
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "Queue purge will delete all messages permanently. Explicit approval required."
+    },
+    {
+      "id": "approve-reset-consumer-offsets",
+      "description": "Consumer offset reset causes re-processing or message skipping — requires approval",
+      "match": {
+        "tools": ["kafka"],
+        "actions": ["configure"],
+        "hasDangerousPattern": "reset-offsets"
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "Consumer offset reset requires approval — affected consumers will re-process or skip messages."
+    },
+    {
+      "id": "approve-alter-retention-policy",
+      "description": "Altering retention policy can cause irreversible data loss",
+      "match": {
+        "tools": ["kafka"],
+        "actions": ["configure"],
+        "hasDangerousPattern": "retention"
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "Altering retention policy requires approval — reducing retention will delete older messages."
+    },
+    {
+      "id": "dry-run-configure",
+      "description": "Configuration changes require dry-run to preview impact",
+      "match": {
+        "actions": ["configure"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "HIGH",
+      "message": "Configuration changes require dry-run validation before applying."
+    },
+    {
+      "id": "medium-risk-publish-production",
+      "description": "Publishing messages to production topics carries medium risk",
+      "match": {
+        "actions": ["publish"],
+        "isProduction": true
+      },
+      "action": "require_dry_run",
+      "riskLevel": "MEDIUM",
+      "message": "Publishing to production topics requires dry-run preview — verify message format and target."
+    },
+    {
+      "id": "auto-approve-list",
+      "description": "Listing or describing topics and queues is non-destructive",
+      "match": {
+        "actions": ["list"]
+      },
+      "action": "allow",
+      "riskLevel": "LOW",
+      "message": "List/describe operations are read-only — auto-approved."
+    },
+    {
+      "id": "auto-approve-consume-non-production",
+      "description": "Consuming messages from non-production queues is low risk",
+      "match": {
+        "actions": ["consume"],
+        "isProduction": false
+      },
+      "action": "allow",
+      "riskLevel": "LOW",
+      "message": "Consuming from non-production queues is auto-approved."
+    }
+  ],
+  "defaults": {
+    "allowUnknown": false,
+    "defaultRiskLevel": "MEDIUM"
+  }
+}
