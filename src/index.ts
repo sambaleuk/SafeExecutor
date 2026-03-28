@@ -67,6 +67,7 @@ export class SafeExecutor {
 // Re-exports for library users
 export { SafeExecutorPipeline } from './core/pipeline.js';
 export { PostgresAdapter } from './adapters/postgres.js';
+export { SecretsAdapter } from './adapters/secrets/index.js';
 export { loadConfig, loadPolicy } from './config/loader.js';
 export type { DatabaseAdapter } from './adapters/adapter.interface.js';
 export type {
@@ -78,3 +79,11 @@ export type {
   AuditEntry,
   ExecutionResult,
 } from './types/index.js';
+export type {
+  ParsedSecretCommand,
+  LeakDetectionResult,
+  SecretsAdapterOptions,
+  SecretTool,
+  SecretAction,
+  SecretEnvironment,
+} from './adapters/secrets/index.js';

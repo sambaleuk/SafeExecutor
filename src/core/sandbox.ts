@@ -73,12 +73,14 @@ export async function runSandbox(
     };
   }
 
-  // UNKNOWN type
-  warnings.push('Unknown operation type — cannot simulate');
+  // UNKNOWN type — delegate to the adapter's own dry-run implementation.
+  // This enables non-SQL adapters (e.g. SecretsAdapter) to provide their own
+  // feasibility check via runInDryRunTransaction().
+  const result = await adapter.runInDryRunTransaction(intent.raw);
   return {
-    feasible: false,
-    estimatedRowsAffected: -1,
-    executionPlan: '',
+    feasible: result.feasible,
+    estimatedRowsAffected: result.rowsAffected,
+    executionPlan: result.plan,
     warnings,
     durationMs: Date.now() - start,
   };
