@@ -1,0 +1,159 @@
+{
+  "version": "1.0",
+  "rules": [
+    {
+      "id": "deny-delete-namespace",
+      "description": "Deleting a namespace destroys every resource inside it — irreversible",
+      "match": {
+        "operationType": ["DROP"],
+        "tablesPattern": ["/namespace/", "/ns/"]
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "kubectl delete namespace is irreversible and destroys all contained resources. Operation denied."
+    },
+    {
+      "id": "deny-delete-all-broad",
+      "description": "Delete without a specific target (--all or no resource name) is too broad",
+      "match": {
+        "operationType": ["DROP"],
+        "hasWhereClause": false
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "Mass delete (--all, no target, or --all-namespaces) is not allowed. Specify a resource name or use --selector."
+    },
+    {
+      "id": "deny-kube-system-write",
+      "description": "All write/delete operations on kube-system are denied — cluster control plane",
+      "match": {
+        "operationType": ["INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "ALTER"],
+        "tablesPattern": ["^kube-system/", "^kube-public/", "^kube-node-lease/"]
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "Write operations on kube-system, kube-public, and kube-node-lease are denied. These namespaces contain critical cluster infrastructure."
+    },
+    {
+      "id": "require-approval-scale-zero",
+      "description": "Scaling to 0 replicas kills all pods — service outage",
+      "match": {
+        "operationType": ["TRUNCATE"]
+      },
+      "action": "require_approval",
+      "riskLevel": "CRITICAL",
+      "message": "kubectl scale --replicas=0 will terminate all pods and cause a service outage. Explicit approval required."
+    },
+    {
+      "id": "require-approval-helm-uninstall",
+      "description": "helm uninstall removes a release and all its resources",
+      "match": {
+        "operationType": ["DROP"],
+        "tablesPattern": ["/release/"]
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "helm uninstall removes the release and all associated Kubernetes resources. Explicit approval required."
+    },
+    {
+      "id": "require-approval-drain-node",
+      "description": "Draining or cordoning a node evicts all pods — disrupts workloads",
+      "match": {
+        "operationType": ["DROP"],
+        "tablesPattern": ["/node/"]
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "kubectl drain/cordon evicts all pods from the node, potentially impacting availability. Explicit approval required."
+    },
+    {
+      "id": "require-approval-exec-production",
+      "description": "kubectl exec into production pods — potential data exfiltration risk",
+      "match": {
+        "operationType": ["SELECT"],
+        "tablesPattern": ["^production/pod/", "^prod/pod/"]
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "kubectl exec into production pods may expose sensitive data. Explicit approval required."
+    },
+    {
+      "id": "require-approval-delete-storage",
+      "description": "Deleting a PV or PVC causes permanent data loss",
+      "match": {
+        "operationType": ["DROP"],
+        "tablesPattern": ["/pv/", "/pvc/", "/persistentvolume/", "/persistentvolumeclaim/"]
+      },
+      "action": "require_approval",
+      "riskLevel": "CRITICAL",
+      "message": "Deleting persistent volumes or claims causes permanent data loss. Explicit approval required."
+    },
+    {
+      "id": "require-approval-delete-production",
+      "description": "Any delete in production namespace requires approval",
+      "match": {
+        "operationType": ["DELETE"],
+        "tablesPattern": ["^production/", "^prod/"]
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "Delete operations in the production namespace require explicit approval."
+    },
+    {
+      "id": "require-dry-run-apply",
+      "description": "kubectl apply and helm install require dry-run to preview resource changes",
+      "match": {
+        "operationType": ["INSERT"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "MEDIUM",
+      "message": "apply/install requires dry-run to preview what resources will be created or updated."
+    },
+    {
+      "id": "require-dry-run-update",
+      "description": "kubectl patch/edit/scale and helm upgrade require dry-run",
+      "match": {
+        "operationType": ["UPDATE"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "MEDIUM",
+      "message": "Update operations require dry-run to preview the impact on running resources."
+    },
+    {
+      "id": "warn-apply-no-namespace",
+      "description": "apply/create without explicit namespace defaults to 'default' — often unintentional",
+      "match": {
+        "operationType": ["INSERT"],
+        "tablesPattern": ["^\\*/"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "MEDIUM",
+      "message": "No namespace specified — operation will target the 'default' namespace. Confirm this is intentional."
+    },
+    {
+      "id": "require-dry-run-delete",
+      "description": "kubectl delete for a specific named resource requires dry-run to confirm the target",
+      "match": {
+        "operationType": ["DELETE"],
+        "hasWhereClause": true
+      },
+      "action": "require_dry_run",
+      "riskLevel": "HIGH",
+      "message": "Delete requires dry-run to confirm the exact resource that will be removed."
+    },
+    {
+      "id": "allow-read-ops",
+      "description": "Read-only operations (get, describe, logs, top) are always safe",
+      "match": {
+        "operationType": ["SELECT"]
+      },
+      "action": "allow",
+      "riskLevel": "LOW",
+      "message": "Read-only operation — allowed."
+    }
+  ],
+  "defaults": {
+    "allowUnknown": false,
+    "defaultRiskLevel": "HIGH"
+  }
+}
