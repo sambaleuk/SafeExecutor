@@ -96,7 +96,17 @@ export type {
   CloudActionType,
 } from './adapters/cloud/index.js';
 export type {
-  SafeAdapter,
   SimulationResult,
   AdapterExecutionResult,
 } from './core/types.js';
+
+// ── Filesystem / Shell Adapter ────────────────────────────────────────────────
+export { FilesystemAdapter } from './adapters/filesystem/index.js';
+export { parseIntent as parseFilesystemIntent } from './adapters/filesystem/index.js';
+export type {
+  FilesystemIntent,
+  FilesystemSnapshot,
+  FsCommandType,
+  FsOperationCategory,
+  PathRiskInfo,
+} from './adapters/filesystem/index.js';

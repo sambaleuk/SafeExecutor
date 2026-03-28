@@ -1,27 +1,24 @@
 /** @type {import('ts-jest').JestConfigWithTsJest} */
 module.exports = {
-  preset: 'ts-jest',
+  preset: 'ts-jest/presets/default-esm',
   testEnvironment: 'node',
-  testMatch: ['**/tests/**/*.test.ts'],
-  // Resolve .js extension imports to their .ts source files
+  extensionsToTreatAsEsm: ['.ts'],
   moduleNameMapper: {
+    // Rewrite .js imports to their .ts source so ts-jest can resolve them
     '^(\\.{1,2}/.*)\\.js$': '$1',
   },
-  globals: {
-    'ts-jest': {
-      tsconfig: {
-        // Use CommonJS for tests to avoid ESM/jest complexity
-        module: 'CommonJS',
-        moduleResolution: 'Node',
-        esModuleInterop: true,
-        resolveJsonModule: true,
-        strict: true,
-        // Tests may have intentional unused imports in mocks
-        noUnusedLocals: false,
-        noUnusedParameters: false,
-        target: 'ES2022',
-        lib: ['ES2022'],
+  transform: {
+    '^.+\\.tsx?$': [
+      'ts-jest',
+      {
+        useESM: true,
+        tsconfig: {
+          // ts-jest needs ESNext module for ESM transform
+          module: 'ESNext',
+          moduleResolution: 'bundler',
+        },
       },
-    },
+    ],
   },
+  testMatch: ['**/tests/**/*.test.ts'],
 };
