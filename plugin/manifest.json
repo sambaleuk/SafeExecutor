@@ -1,0 +1,20 @@
+{
+  "name": "SafeExecutor",
+  "version": "0.1.0",
+  "description": "Policy-enforced safety harness for dangerous operations. Analyzes commands across 10 domains (SQL, cloud, Kubernetes, filesystem, CI/CD, API, secrets, git, network, queue) and enforces allow/deny/require_approval decisions before execution.",
+  "author": "sambaleuk",
+  "license": "MIT",
+  "mcpServers": {
+    "safe-executor": {
+      "command": "npx",
+      "args": ["safe-executor", "--mcp"],
+      "env": {}
+    }
+  },
+  "skills": [
+    {
+      "name": "safe-executor",
+      "file": "SKILL.md"
+    }
+  ]
+}

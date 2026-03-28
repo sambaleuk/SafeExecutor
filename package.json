@@ -5,19 +5,35 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "safe-executor": "./dist/bin/safe-executor-mcp.js"
+  },
   "exports": {
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./mcp-server": {
+      "import": "./dist/mcp-server/index.js",
+      "types": "./dist/mcp-server/index.d.ts"
     }
   },
+  "files": [
+    "dist/",
+    "plugin/",
+    "config/policies/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-vm-modules node_modules/.bin/jest",
     "lint": "eslint src --ext .ts",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "mcp": "node dist/bin/safe-executor-mcp.js",
+    "prepublishOnly": "npm run clean && npm run build"
   },
   "keywords": [
     "database",
@@ -28,7 +44,12 @@
     "audit",
     "approval",
     "dry-run",
-    "production"
+    "production",
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "llm-safety",
+    "policy-engine"
   ],
   "author": "sambaleuk",
   "license": "MIT",
@@ -37,6 +58,7 @@
     "url": "git+https://github.com/sambaleuk/SafeExecutor.git"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.28.0",
     "ajv": "^8.17.1",
     "node-sql-parser": "^5.4.0",
     "pg": "^8.13.1"
@@ -51,6 +73,6 @@
     "typescript": "^5.6.0"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=18.0.0"
   }
 }
