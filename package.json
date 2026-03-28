@@ -44,6 +44,7 @@
   "devDependencies": {
     "@types/jest": "^29.5.14",
     "@types/node": "^22.0.0",
+    "@types/node-sql-parser": "^1.0.0",
     "@types/pg": "^8.11.10",
     "jest": "^29.7.0",
     "ts-jest": "^29.2.5",

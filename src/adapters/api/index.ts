@@ -1,16 +1,24 @@
-/**
- * API Adapter — Phase 6 (not yet implemented)
- *
- * Will support safe execution of HTTP API calls from autonomous agents.
- * See ROADMAP_V2.md — Phase 6 for full specification.
- *
- * Planned capabilities:
- *   - Parse HTTP request objects → SafeIntent
- *   - Risk classification by method (GET=read, POST=write, DELETE=destroy)
- *   - PII detection in payloads (emails, SSNs, credit cards)
- *   - Credential detection (password, token, secret fields)
- *   - Sandbox via mock/staging endpoint routing
- *   - Rate limiting per endpoint
- */
+export { ApiAdapter } from './adapter.js';
+export { parseHttpRequest } from './parser.js';
+export { detectSensitiveData, maskSensitiveFields, maskValue } from './sensitive-detector.js';
+export { RateLimiter } from './rate-limiter.js';
+export { runSandbox } from './sandbox.js';
 
-export {};
+export type {
+  HttpMethod,
+  EndpointCategory,
+  SensitiveFieldType,
+  SensitiveDataMatch,
+  ParsedHttpRequest,
+  ApiPolicyRule,
+  ApiPolicy,
+  ApiPolicyDecision,
+  RateLimitConfig,
+  RateLimitStatus,
+  ApiSandboxResult,
+  ApiExecutionResult,
+  ApiAuditEntry,
+  ApiPipelineResult,
+  ApiAdapterConfig,
+  HttpClient,
+} from './types.js';
