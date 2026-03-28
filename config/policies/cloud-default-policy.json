@@ -1,0 +1,144 @@
+{
+  "version": "1.0",
+  "name": "cloud-default",
+  "description": "Default safety policy for cloud infrastructure operations (Terraform, AWS, GCP, Azure)",
+  "rules": [
+    {
+      "id": "deny-terraform-destroy-all",
+      "description": "Deny terraform destroy without -target — would destroy ALL resources in state",
+      "match": {
+        "provider": "terraform",
+        "action": "destroy",
+        "affectsAll": true
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "terraform destroy without -target will destroy ALL managed resources. Specify -target=<resource_type.name> to limit scope."
+    },
+    {
+      "id": "deny-vpc-subnet-deletion",
+      "description": "Deny VPC and subnet deletion — breaks entire network environments",
+      "match": {
+        "provider": "aws",
+        "service": "ec2",
+        "action": ["delete-vpc", "delete-subnet"]
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "VPC/subnet deletion is irreversible and can take down entire environments. Requires human escalation outside of SafeExecutor."
+    },
+    {
+      "id": "require-approval-db-deletion",
+      "description": "Require approval for database instance deletion (RDS, Cloud SQL, Azure SQL)",
+      "match": {
+        "action": ["delete-db-instance", "delete-db-cluster"],
+        "riskLevel": "CRITICAL"
+      },
+      "action": "require_approval",
+      "riskLevel": "CRITICAL",
+      "message": "Database deletion is irreversible and destroys all data. Explicit approval required."
+    },
+    {
+      "id": "require-approval-iam",
+      "description": "Require approval for IAM role, policy, and identity modifications",
+      "match": {
+        "service": ["iam", "ad"],
+        "actionType": ["WRITE", "DESTROY"]
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "IAM/AD modifications affect authentication and authorization for all services. Approval required."
+    },
+    {
+      "id": "require-approval-security-group-delete",
+      "description": "Require approval for security group deletion",
+      "match": {
+        "provider": "aws",
+        "service": "ec2",
+        "action": "delete-security-group"
+      },
+      "action": "require_approval",
+      "riskLevel": "CRITICAL",
+      "message": "Security group deletion can lock out or expose resources that depend on it."
+    },
+    {
+      "id": "require-approval-security-group-modify",
+      "description": "High risk for security group ingress/egress modifications",
+      "match": {
+        "provider": "aws",
+        "service": "ec2",
+        "action": [
+          "authorize-security-group-ingress",
+          "authorize-security-group-egress",
+          "revoke-security-group-ingress",
+          "revoke-security-group-egress"
+        ]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "HIGH",
+      "message": "Security group rule changes can expose services to the internet or block legitimate traffic."
+    },
+    {
+      "id": "require-approval-s3-bucket-deletion",
+      "description": "Require approval before deleting S3 buckets",
+      "match": {
+        "action": ["rb", "delete-bucket"]
+      },
+      "action": "require_approval",
+      "riskLevel": "CRITICAL",
+      "message": "S3 bucket deletion permanently removes all stored data. Approval required."
+    },
+    {
+      "id": "escalate-force-flag",
+      "description": "Require approval for any operation using the --force flag",
+      "match": {
+        "hasForceFlag": true
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "The --force flag bypasses safety confirmations. Explicit approval required."
+    },
+    {
+      "id": "allow-read-operations",
+      "description": "Allow all read-only operations (describe, list, get, show, plan)",
+      "match": {
+        "actionType": "READ"
+      },
+      "action": "allow",
+      "riskLevel": "LOW"
+    },
+    {
+      "id": "require-dry-run-write",
+      "description": "Simulate all write operations before execution",
+      "match": {
+        "actionType": "WRITE"
+      },
+      "action": "require_dry_run",
+      "riskLevel": "MEDIUM"
+    },
+    {
+      "id": "require-approval-destroy",
+      "description": "Require approval for all destroy/delete/terminate operations",
+      "match": {
+        "actionType": "DESTROY"
+      },
+      "action": "require_approval",
+      "riskLevel": "CRITICAL",
+      "message": "Destructive cloud operations are irreversible. Explicit approval required."
+    },
+    {
+      "id": "require-approval-state-modify",
+      "description": "Require approval for Terraform state modifications (state rm/mv, taint)",
+      "match": {
+        "actionType": "STATE_MODIFY"
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "Terraform state modifications can corrupt infrastructure state and cause drift."
+    }
+  ],
+  "defaults": {
+    "allowUnknown": false,
+    "defaultRiskLevel": "HIGH"
+  }
+}

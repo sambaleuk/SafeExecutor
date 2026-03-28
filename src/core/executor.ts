@@ -18,14 +18,13 @@ const ROLLBACK_MULTIPLIER = 1.5; // roll back if actual > estimated * 1.5
 export async function executeWithRollback(
   intent: ParsedIntent,
   adapter: DatabaseAdapter,
-  config: SafeExecutorConfig,
+  _config: SafeExecutorConfig,
   estimatedRows: number | null,
 ): Promise<ExecutionResult> {
   const start = Date.now();
   const savepointName = `se_sp_${Date.now()}`;
 
   let rowsAffected = 0;
-  let rolledBack = false;
   let rollbackReason: string | undefined;
 
   try {
@@ -44,7 +43,6 @@ export async function executeWithRollback(
       rollbackReason = `Rows affected (${rowsAffected}) exceeds predicted (${estimatedRows}) by factor ${ROLLBACK_MULTIPLIER}`;
       await adapter.rollbackToSavepoint(savepointName);
       await adapter.rollbackTransaction();
-      rolledBack = true;
 
       return {
         status: 'rolled_back',
