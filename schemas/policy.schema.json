@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/sambaleuk/SafeExecutor/schemas/policy.schema.json",
+  "title": "SafeExecutorPolicy",
+  "description": "Policy schema defining which operations are allowed, denied, or require approval",
+  "type": "object",
+  "required": ["version", "rules", "defaults"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+$"
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "description", "match", "action", "riskLevel"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string"
+          },
+          "match": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "operationType": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "ALTER", "DROP", "CREATE", "UNKNOWN"]
+                }
+              },
+              "hasWhereClause": {
+                "type": "boolean"
+              },
+              "tablesPattern": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "minRowsAffected": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "action": {
+            "type": "string",
+            "enum": ["allow", "deny", "require_approval", "require_dry_run"]
+          },
+          "riskLevel": {
+            "type": "string",
+            "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "defaults": {
+      "type": "object",
+      "required": ["allowUnknown", "defaultRiskLevel"],
+      "additionalProperties": false,
+      "properties": {
+        "allowUnknown": {
+          "type": "boolean",
+          "description": "Whether to allow operations not matched by any rule"
+        },
+        "defaultRiskLevel": {
+          "type": "string",
+          "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+        }
+      }
+    }
+  }
+}

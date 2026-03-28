@@ -1,0 +1,113 @@
+{
+  "version": "1.0",
+  "rules": [
+    {
+      "id": "deny-delete-no-where",
+      "description": "Deny DELETE without WHERE clause — too dangerous",
+      "match": {
+        "operationType": ["DELETE"],
+        "hasWhereClause": false
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "DELETE without WHERE clause is not allowed. Add a WHERE condition or use TRUNCATE with explicit approval."
+    },
+    {
+      "id": "deny-truncate",
+      "description": "TRUNCATE always requires explicit approval — wipes entire table",
+      "match": {
+        "operationType": ["TRUNCATE"]
+      },
+      "action": "require_approval",
+      "riskLevel": "CRITICAL",
+      "message": "TRUNCATE requires explicit human approval. This will delete ALL rows in the table."
+    },
+    {
+      "id": "deny-drop",
+      "description": "DROP TABLE/INDEX/etc requires approval — irreversible",
+      "match": {
+        "operationType": ["DROP"]
+      },
+      "action": "require_approval",
+      "riskLevel": "CRITICAL",
+      "message": "DROP operations are irreversible and require explicit approval."
+    },
+    {
+      "id": "alter-large-table",
+      "description": "ALTER on any table requires dry-run and approval (schema changes can lock tables)",
+      "match": {
+        "operationType": ["ALTER"]
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "ALTER operations may cause table locks. Review the execution plan before proceeding."
+    },
+    {
+      "id": "delete-with-where-dry-run",
+      "description": "DELETE with WHERE requires dry-run to estimate impact",
+      "match": {
+        "operationType": ["DELETE"],
+        "hasWhereClause": true
+      },
+      "action": "require_dry_run",
+      "riskLevel": "HIGH",
+      "message": "DELETE with WHERE requires dry-run impact assessment."
+    },
+    {
+      "id": "update-no-where",
+      "description": "UPDATE without WHERE affects all rows — require approval",
+      "match": {
+        "operationType": ["UPDATE"],
+        "hasWhereClause": false
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "UPDATE without WHERE clause will affect ALL rows in the table."
+    },
+    {
+      "id": "update-with-where",
+      "description": "UPDATE with WHERE requires dry-run",
+      "match": {
+        "operationType": ["UPDATE"],
+        "hasWhereClause": true
+      },
+      "action": "require_dry_run",
+      "riskLevel": "MEDIUM",
+      "message": "UPDATE requires dry-run to verify row impact."
+    },
+    {
+      "id": "insert-allow",
+      "description": "INSERT operations are allowed with dry-run",
+      "match": {
+        "operationType": ["INSERT"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "LOW",
+      "message": "INSERT allowed after dry-run."
+    },
+    {
+      "id": "select-allow",
+      "description": "SELECT queries are read-only — always pass-through",
+      "match": {
+        "operationType": ["SELECT"]
+      },
+      "action": "allow",
+      "riskLevel": "LOW",
+      "message": "SELECT is read-only — allowed."
+    },
+    {
+      "id": "create-allow",
+      "description": "CREATE TABLE/INDEX requires dry-run review",
+      "match": {
+        "operationType": ["CREATE"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "MEDIUM",
+      "message": "CREATE operations require dry-run review."
+    }
+  ],
+  "defaults": {
+    "allowUnknown": false,
+    "defaultRiskLevel": "HIGH"
+  }
+}

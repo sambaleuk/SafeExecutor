@@ -1,0 +1,51 @@
+{
+  "name": "safe-executor",
+  "version": "0.1.0",
+  "description": "A harness for safe, gate-enforced execution of operations on sensitive systems. Inspired by Modragor.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest",
+    "lint": "eslint src --ext .ts",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "database",
+    "safety",
+    "harness",
+    "postgres",
+    "sql",
+    "audit",
+    "approval",
+    "dry-run",
+    "production"
+  ],
+  "author": "sambaleuk",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sambaleuk/SafeExecutor.git"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

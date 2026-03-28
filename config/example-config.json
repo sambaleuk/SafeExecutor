@@ -1,0 +1,27 @@
+{
+  "version": "1.0",
+  "environment": "staging",
+  "executor": "migration-bot",
+  "database": {
+    "adapter": "postgres",
+    "connectionString": "postgresql://user:password@localhost:5432/mydb",
+    "schema": "public",
+    "allowedTables": ["users", "orders", "products", "sessions"],
+    "blockedTables": ["audit_log", "payment_methods"],
+    "maxRowsThreshold": 50000
+  },
+  "policy": {
+    "file": "./config/default-policy.json",
+    "strictMode": true
+  },
+  "approval": {
+    "mode": "cli",
+    "timeoutSeconds": 300
+  },
+  "audit": {
+    "enabled": true,
+    "output": "file",
+    "filePath": "./logs/safe-executor-audit.log",
+    "retentionDays": 90
+  }
+}

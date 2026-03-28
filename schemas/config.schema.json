@@ -1,0 +1,113 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/sambaleuk/SafeExecutor/schemas/config.schema.json",
+  "title": "SafeExecutorConfig",
+  "description": "Configuration schema for a SafeExecutor instance",
+  "type": "object",
+  "required": ["version", "environment", "executor", "database", "policy", "approval", "audit"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Config schema version",
+      "pattern": "^\\d+\\.\\d+$"
+    },
+    "environment": {
+      "type": "string",
+      "description": "Deployment environment (e.g. production, staging, dev)",
+      "minLength": 1
+    },
+    "executor": {
+      "type": "string",
+      "description": "Identifier of the service or user running operations",
+      "minLength": 1
+    },
+    "database": {
+      "type": "object",
+      "required": ["adapter", "connectionString", "maxRowsThreshold"],
+      "additionalProperties": false,
+      "properties": {
+        "adapter": {
+          "type": "string",
+          "enum": ["postgres", "mysql", "sqlite"]
+        },
+        "connectionString": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema": {
+          "type": "string"
+        },
+        "allowedTables": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "blockedTables": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "maxRowsThreshold": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Abort execution if rows affected exceed this value"
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "required": ["file", "strictMode"],
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "type": "string",
+          "description": "Path to policy.json"
+        },
+        "strictMode": {
+          "type": "boolean",
+          "description": "Deny all operations not explicitly covered by a rule"
+        }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "required": ["mode", "timeoutSeconds"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["auto", "cli", "webhook"]
+        },
+        "webhookUrl": {
+          "type": "string",
+          "format": "uri"
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 3600
+        }
+      }
+    },
+    "audit": {
+      "type": "object",
+      "required": ["enabled", "output"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "output": {
+          "type": "string",
+          "enum": ["console", "file", "database"]
+        },
+        "filePath": {
+          "type": "string"
+        },
+        "retentionDays": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

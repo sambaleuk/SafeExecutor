@@ -1,0 +1,92 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/sambaleuk/SafeExecutor/schemas/audit.schema.json",
+  "title": "SafeExecutorAuditEntry",
+  "description": "Schema for a SafeExecutor audit log entry",
+  "type": "object",
+  "required": ["id", "timestamp", "executor", "operation", "policyDecision", "totalDurationMs", "environment"],
+  "properties": {
+    "id": { "type": "string" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "executor": { "type": "string" },
+    "environment": { "type": "string" },
+    "totalDurationMs": { "type": "integer", "minimum": 0 },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "operation": {
+      "type": "object",
+      "required": ["raw", "type", "tables", "hasWhereClause", "isDestructive", "isMassive"],
+      "properties": {
+        "raw": { "type": "string" },
+        "type": { "type": "string" },
+        "tables": { "type": "array", "items": { "type": "string" } },
+        "hasWhereClause": { "type": "boolean" },
+        "estimatedRowsAffected": { "type": ["integer", "null"] },
+        "isDestructive": { "type": "boolean" },
+        "isMassive": { "type": "boolean" },
+        "metadata": { "type": "object" }
+      }
+    },
+    "policyDecision": {
+      "type": "object",
+      "required": ["allowed", "riskLevel", "requiresDryRun", "requiresApproval", "message"],
+      "properties": {
+        "allowed": { "type": "boolean" },
+        "riskLevel": { "type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"] },
+        "requiresDryRun": { "type": "boolean" },
+        "requiresApproval": { "type": "boolean" },
+        "matchedRules": { "type": "array" },
+        "message": { "type": "string" }
+      }
+    },
+    "sandboxResult": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "properties": {
+            "feasible": { "type": "boolean" },
+            "estimatedRowsAffected": { "type": "integer" },
+            "executionPlan": { "type": "string" },
+            "warnings": { "type": "array", "items": { "type": "string" } },
+            "durationMs": { "type": "integer" }
+          }
+        }
+      ]
+    },
+    "approvalResponse": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "properties": {
+            "requestId": { "type": "string" },
+            "status": { "type": "string", "enum": ["auto_approved", "pending", "approved", "rejected"] },
+            "approvedBy": { "type": "string" },
+            "approvedAt": { "type": "string" },
+            "comment": { "type": "string" }
+          }
+        }
+      ]
+    },
+    "executionResult": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "properties": {
+            "status": { "type": "string", "enum": ["success", "rolled_back", "failed", "dry_run"] },
+            "rowsAffected": { "type": "integer" },
+            "durationMs": { "type": "integer" },
+            "savepointUsed": { "type": "boolean" },
+            "rolledBack": { "type": "boolean" },
+            "rollbackReason": { "type": "string" },
+            "error": { "type": "string" }
+          }
+        }
+      ]
+    }
+  }
+}
