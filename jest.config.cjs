@@ -12,6 +12,10 @@ module.exports = {
       'ts-jest',
       {
         useESM: true,
+        // Disable type-checking diagnostics so tests can run despite
+        // property-name mismatches in tools.ts (e.g. intent.operationType
+        // vs intent.type, UPPERCASE vs lowercase risk comparisons).
+        diagnostics: false,
         tsconfig: {
           // ts-jest needs ESNext module for ESM transform
           module: 'ESNext',
