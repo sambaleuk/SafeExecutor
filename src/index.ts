@@ -87,6 +87,10 @@ export type {
 
 // ── Cloud Infrastructure Adapter ──────────────────────────────────────────────
 export { CloudAdapter } from './adapters/cloud/index.js';
+
+// ── Kubernetes Adapter ────────────────────────────────────────────────────────
+export { KubernetesAdapter } from './adapters/kubernetes/index.js';
+export type { KubernetesAdapterOptions } from './adapters/kubernetes/index.js';
 export type {
   CloudIntent,
   CloudCommand,
