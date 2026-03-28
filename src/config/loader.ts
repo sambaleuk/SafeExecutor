@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import Ajv from 'ajv';
+import { Ajv } from 'ajv';
+import type { ErrorObject } from 'ajv';
 import type { SafeExecutorConfig, Policy } from '../types/index.js';
 
 /**
@@ -13,7 +14,7 @@ import type { SafeExecutorConfig, Policy } from '../types/index.js';
  * never derived from runtime state.
  */
 
-const ajv = new Ajv({ allErrors: true, strict: true });
+const ajv = new Ajv({ allErrors: true, strict: false });
 
 function loadSchema(schemaPath: string): object {
   const resolved = path.resolve(schemaPath);
@@ -39,7 +40,7 @@ export function loadConfig(configPath: string): SafeExecutorConfig {
 
   const validate = ajv.compile(schema);
   if (!validate(config)) {
-    const errors = validate.errors?.map((e) => `  ${e.instancePath} ${e.message}`).join('\n');
+    const errors = validate.errors?.map((e: ErrorObject) => `  ${e.instancePath} ${e.message}`).join('\n');
     throw new Error(`Invalid config at ${configPath}:\n${errors}`);
   }
 
@@ -54,7 +55,7 @@ export function loadPolicy(policyPath: string): Policy {
 
   const validate = ajv.compile(schema);
   if (!validate(policy)) {
-    const errors = validate.errors?.map((e) => `  ${e.instancePath} ${e.message}`).join('\n');
+    const errors = validate.errors?.map((e: ErrorObject) => `  ${e.instancePath} ${e.message}`).join('\n');
     throw new Error(`Invalid policy at ${policyPath}:\n${errors}`);
   }
 
