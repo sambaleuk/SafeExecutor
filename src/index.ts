@@ -84,3 +84,19 @@ export type {
   Target,
   Scope,
 } from './types/index.js';
+
+// ── Cloud Infrastructure Adapter ──────────────────────────────────────────────
+export { CloudAdapter } from './adapters/cloud/index.js';
+export type {
+  CloudIntent,
+  CloudCommand,
+  CloudSnapshot,
+  CloudProvider,
+  CloudRiskLevel,
+  CloudActionType,
+} from './adapters/cloud/index.js';
+export type {
+  SafeAdapter,
+  SimulationResult,
+  AdapterExecutionResult,
+} from './core/types.js';
