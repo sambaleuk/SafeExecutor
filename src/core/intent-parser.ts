@@ -10,8 +10,6 @@ import type { ParsedIntent, OperationType } from '../types/index.js';
  * Design principle: fails loud on ambiguous or unparseable input.
  */
 
-const MASSIVE_ROW_THRESHOLD = 10_000;
-
 // Regex patterns for operation detection
 const PATTERNS: Record<OperationType, RegExp> = {
   SELECT: /^\s*SELECT\b/i,
