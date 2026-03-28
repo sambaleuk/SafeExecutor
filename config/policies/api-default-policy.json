@@ -1,0 +1,148 @@
+{
+  "version": "1.0",
+  "rules": [
+    {
+      "id": "deny-credentials-in-url",
+      "description": "Deny requests that embed credentials in URL query parameters — use Authorization header instead",
+      "match": {
+        "hasCredentialsInUrl": true
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "Credentials in URL query parameters are not allowed. Use the Authorization header instead."
+    },
+    {
+      "id": "deny-delete-users-accounts",
+      "description": "DELETE on user or account resources requires approval",
+      "match": {
+        "methods": ["DELETE"],
+        "pathPattern": "\\/(users|accounts|customers|members)(\\/|$)"
+      },
+      "action": "require_approval",
+      "riskLevel": "CRITICAL",
+      "message": "DELETE on user/account resources requires explicit approval — this may be irreversible."
+    },
+    {
+      "id": "require-approval-payment-post",
+      "description": "POST to payment endpoints requires approval — financial write operation",
+      "match": {
+        "methods": ["POST"],
+        "endpointCategory": ["payment"]
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "POST to payment endpoint requires approval. Verify amount and recipient."
+    },
+    {
+      "id": "require-approval-payment-delete",
+      "description": "DELETE on payment endpoints is irreversible — always require approval",
+      "match": {
+        "methods": ["DELETE"],
+        "endpointCategory": ["payment"]
+      },
+      "action": "require_approval",
+      "riskLevel": "CRITICAL",
+      "message": "DELETE on payment endpoint is irreversible and requires explicit approval."
+    },
+    {
+      "id": "require-dry-run-payment-put-patch",
+      "description": "PUT/PATCH on payment endpoints requires dry-run review",
+      "match": {
+        "methods": ["PUT", "PATCH"],
+        "endpointCategory": ["payment"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "HIGH",
+      "message": "Modifying payment records requires dry-run review."
+    },
+    {
+      "id": "require-approval-bulk-large",
+      "description": "Bulk operations with more than 100 items require approval",
+      "match": {
+        "endpointCategory": ["bulk"],
+        "minItemCount": 100
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "Bulk operations with >100 items require explicit approval."
+    },
+    {
+      "id": "require-dry-run-bulk",
+      "description": "Any bulk operation requires dry-run to review scope",
+      "match": {
+        "endpointCategory": ["bulk"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "MEDIUM",
+      "message": "Bulk operations require dry-run review before execution."
+    },
+    {
+      "id": "require-dry-run-admin-write",
+      "description": "Write operations on admin endpoints require dry-run",
+      "match": {
+        "methods": ["POST", "PUT", "PATCH", "DELETE"],
+        "endpointCategory": ["admin"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "HIGH",
+      "message": "Admin endpoint write operations require dry-run review."
+    },
+    {
+      "id": "require-dry-run-auth-write",
+      "description": "Write operations on auth endpoints (token creation, session management) require dry-run",
+      "match": {
+        "methods": ["POST", "PUT", "PATCH", "DELETE"],
+        "endpointCategory": ["auth"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "MEDIUM",
+      "message": "Auth endpoint write operations may have wide blast radius — dry-run required."
+    },
+    {
+      "id": "require-dry-run-delete",
+      "description": "All DELETE operations require dry-run to confirm target",
+      "match": {
+        "methods": ["DELETE"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "HIGH",
+      "message": "DELETE operations require dry-run review."
+    },
+    {
+      "id": "require-dry-run-put-patch",
+      "description": "PUT and PATCH operations on non-trivial resources require dry-run",
+      "match": {
+        "methods": ["PUT", "PATCH"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "MEDIUM",
+      "message": "Modification operations require dry-run to verify scope."
+    },
+    {
+      "id": "allow-get-head-options",
+      "description": "Read-only methods are always allowed",
+      "match": {
+        "methods": ["GET", "HEAD", "OPTIONS"]
+      },
+      "action": "allow",
+      "riskLevel": "LOW",
+      "message": "Read-only request — allowed."
+    },
+    {
+      "id": "allow-post-standard",
+      "description": "POST to standard (non-payment, non-auth, non-admin) endpoints is allowed after dry-run",
+      "match": {
+        "methods": ["POST"],
+        "endpointCategory": ["standard"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "LOW",
+      "message": "POST to standard endpoint requires dry-run check."
+    }
+  ],
+  "defaults": {
+    "allowUnknown": false,
+    "defaultRiskLevel": "MEDIUM",
+    "maxFinancialAmount": 10000
+  }
+}
