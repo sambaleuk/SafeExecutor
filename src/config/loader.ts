@@ -1,7 +1,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import Ajv from 'ajv';
+import _Ajv from 'ajv';
+import type { ErrorObject } from 'ajv';
 import type { SafeExecutorConfig, Policy } from '../types/index.js';
+
+// ajv v8 ESM/CJS interop: cast required under NodeNext module resolution
+type ValidateFn = ((data: unknown) => boolean) & { errors?: ErrorObject[] | null };
+type AjvInstance = { compile(schema: object): ValidateFn };
+type AjvConstructor = new (options?: object) => AjvInstance;
+const Ajv = _Ajv as unknown as AjvConstructor;
 
 /**
  * Config Loader
@@ -39,7 +46,7 @@ export function loadConfig(configPath: string): SafeExecutorConfig {
 
   const validate = ajv.compile(schema);
   if (!validate(config)) {
-    const errors = validate.errors?.map((e) => `  ${e.instancePath} ${e.message}`).join('\n');
+    const errors = validate.errors?.map((e: ErrorObject) => `  ${e.instancePath} ${e.message}`).join('\n');
     throw new Error(`Invalid config at ${configPath}:\n${errors}`);
   }
 
@@ -54,7 +61,7 @@ export function loadPolicy(policyPath: string): Policy {
 
   const validate = ajv.compile(schema);
   if (!validate(policy)) {
-    const errors = validate.errors?.map((e) => `  ${e.instancePath} ${e.message}`).join('\n');
+    const errors = validate.errors?.map((e: ErrorObject) => `  ${e.instancePath} ${e.message}`).join('\n');
     throw new Error(`Invalid policy at ${policyPath}:\n${errors}`);
   }
 
