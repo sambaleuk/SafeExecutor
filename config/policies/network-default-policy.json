@@ -1,0 +1,161 @@
+{
+  "version": "1.0",
+  "rules": [
+    {
+      "id": "deny-iptables-flush-input",
+      "description": "Flushing the INPUT chain removes all inbound firewall rules — system becomes accessible to all traffic",
+      "match": {
+        "tools": ["iptables"],
+        "isFirewallDisable": true
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "Flushing iptables INPUT chain is forbidden — this would expose the system to all inbound traffic. Use targeted rule deletion instead."
+    },
+    {
+      "id": "deny-loopback-down",
+      "description": "Setting loopback interface down breaks all local services and DNS",
+      "match": {
+        "tools": ["ip"],
+        "isInterfaceDown": true,
+        "interface": "lo"
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "Disabling the loopback interface (lo) is forbidden — it breaks local sockets, DNS resolution, and all services bound to 127.0.0.1."
+    },
+    {
+      "id": "deny-default-route-removal",
+      "description": "Removing the default route cuts off all outbound internet access",
+      "match": {
+        "isDefaultRouteRemoval": true
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "Removing the default route is forbidden — it would cut off all outbound internet access and make the system unreachable remotely."
+    },
+    {
+      "id": "deny-ufw-disable",
+      "description": "Disabling UFW removes all firewall protection",
+      "match": {
+        "tools": ["ufw"],
+        "isFirewallDisable": true
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "Disabling or resetting UFW is forbidden — it removes all firewall protection. Use targeted rule modifications instead."
+    },
+    {
+      "id": "approve-iptables-modification",
+      "description": "Any iptables rule modification requires human approval",
+      "match": {
+        "tools": ["iptables"],
+        "isFirewallModification": true
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "iptables rule modification requires explicit approval — incorrect rules can lock you out or expose services."
+    },
+    {
+      "id": "approve-ufw-rule-modification",
+      "description": "UFW allow/deny rule changes require approval",
+      "match": {
+        "tools": ["ufw"],
+        "isFirewallModification": true
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "UFW rule modification requires explicit approval — ensure the change is intentional and reviewed."
+    },
+    {
+      "id": "approve-interface-down",
+      "description": "Setting a non-loopback interface down requires approval",
+      "match": {
+        "isInterfaceDown": true
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "Bringing a network interface down requires approval — it will interrupt all traffic on that interface."
+    },
+    {
+      "id": "approve-ssh-tunnel",
+      "description": "SSH tunnels to external hosts require approval",
+      "match": {
+        "isTunnel": true
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "SSH tunnel requires approval — tunnels bypass firewall rules and forward traffic to external hosts."
+    },
+    {
+      "id": "approve-nmap-scan",
+      "description": "nmap network scans have legal implications and require explicit authorization",
+      "match": {
+        "tools": ["nmap"],
+        "isScan": true
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "nmap scan requires explicit approval — unauthorized port scanning may be illegal. Ensure you have written authorization for the target."
+    },
+    {
+      "id": "dry-run-iptables-modification",
+      "description": "iptables modifications require dry-run before execution",
+      "match": {
+        "tools": ["iptables"],
+        "isFirewallModification": true
+      },
+      "action": "require_dry_run",
+      "riskLevel": "HIGH",
+      "message": "Dry-run required for iptables modifications — shows current rule set before change."
+    },
+    {
+      "id": "dry-run-route-change",
+      "description": "Route modifications require dry-run to show current routing table",
+      "match": {
+        "tools": ["ip", "route"],
+        "actions": ["configure", "delete"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "HIGH",
+      "message": "Dry-run required for route changes — shows current routing table before modification."
+    },
+    {
+      "id": "allow-dns-queries",
+      "description": "DNS lookup tools are always safe to run",
+      "match": {
+        "tools": ["dig", "nslookup", "host", "whois"],
+        "actions": ["query"]
+      },
+      "action": "allow",
+      "riskLevel": "LOW",
+      "message": "DNS query — read-only, safe to execute."
+    },
+    {
+      "id": "allow-network-status",
+      "description": "Network status tools (netstat, ss, ping, traceroute) are read-only",
+      "match": {
+        "tools": ["netstat", "ss", "ping", "traceroute"],
+        "actions": ["query"]
+      },
+      "action": "allow",
+      "riskLevel": "LOW",
+      "message": "Network status check — read-only, safe to execute."
+    },
+    {
+      "id": "allow-ip-show",
+      "description": "ip addr/link/route show commands are read-only",
+      "match": {
+        "tools": ["ip"],
+        "actions": ["query"]
+      },
+      "action": "allow",
+      "riskLevel": "LOW",
+      "message": "ip show command — read-only, safe to execute."
+    }
+  ],
+  "defaults": {
+    "allowUnknown": false,
+    "defaultRiskLevel": "HIGH"
+  }
+}
