@@ -1,14 +1,19 @@
-export { SecretsAdapter } from './adapter.js';
+export { SecretsAdapter, evaluateSecretPolicy } from './adapter.js';
 export { parseSecretCommand } from './parser.js';
-export { detectLeaks, maskSecrets } from './leak-detector.js';
-export { SecretSandbox } from './sandbox.js';
+export { simulateSecretCommand } from './sandbox.js';
+export { detectLeaks, maskSecret } from './leak-detector.js';
 export type {
-  ParsedSecretCommand,
-  LeakDetectionResult,
-  LeakPattern,
-  SecretSandboxOutcome,
-  SecretsAdapterOptions,
   SecretTool,
   SecretAction,
-  SecretEnvironment,
+  SecretScope,
+  ParsedSecretCommand,
+  SecretSnapshot,
+  SecretPolicy,
+  SecretPolicyRule,
+  SecretPolicyDecision,
+  LeakDetectionResult,
+  DetectedLeak,
+  LeakType,
+  DangerousPattern,
+  ValidationResult,
 } from './types.js';

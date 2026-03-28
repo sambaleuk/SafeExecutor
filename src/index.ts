@@ -116,12 +116,22 @@ export type {
 } from './adapters/filesystem/index.js';
 
 // ── Secret Manager Adapter ────────────────────────────────────────────────────
-export { SecretsAdapter } from './adapters/secrets/index.js';
+export { SecretsAdapter, evaluateSecretPolicy } from './adapters/secrets/index.js';
+export { parseSecretCommand } from './adapters/secrets/index.js';
+export { simulateSecretCommand } from './adapters/secrets/index.js';
+export { detectLeaks, maskSecret } from './adapters/secrets/index.js';
 export type {
   ParsedSecretCommand,
   LeakDetectionResult,
-  SecretsAdapterOptions,
+  DetectedLeak,
+  LeakType,
   SecretTool,
   SecretAction,
-  SecretEnvironment,
+  SecretScope,
+  SecretSnapshot,
+  SecretPolicy,
+  SecretPolicyRule,
+  SecretPolicyDecision,
+  DangerousPattern as SecretDangerousPattern,
+  ValidationResult as SecretValidationResult,
 } from './adapters/secrets/index.js';

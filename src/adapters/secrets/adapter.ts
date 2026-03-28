@@ -1,356 +1,197 @@
-import { spawnSync } from 'node:child_process';
-import type { SafeAdapter } from '../adapter.interface.js';
+import { spawnSync } from 'child_process';
+import type { SafeAdapter, SimulationResult, AdapterExecutionResult } from '../../core/types.js';
 import type {
-  SafeIntent,
-  SandboxResult,
-  ExecutionResult,
-  SafeExecutorConfig,
-  RiskFactor,
-  OperationType,
-  Target,
-  Scope,
-} from '../../types/index.js';
+  SecretPolicy,
+  SecretPolicyDecision,
+  SecretPolicyRule,
+  SecretSnapshot,
+  ParsedSecretCommand,
+} from './types.js';
+import type { RiskLevel } from '../../types/index.js';
 import { parseSecretCommand } from './parser.js';
-import { detectLeaks } from './leak-detector.js';
-import { SecretSandbox } from './sandbox.js';
-import type { SecretsAdapterOptions, SecretAction, ParsedSecretCommand } from './types.js';
+import { simulateSecretCommand } from './sandbox.js';
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Policy evaluator ──────────────────────────────────────────────────────────
 
-function actionToOperationType(action: SecretAction): OperationType {
-  switch (action) {
-    case 'read':
-    case 'list':
-      return 'SELECT';
-    case 'write':
-      return 'INSERT';
-    case 'rotate':
-      return 'UPDATE';
-    case 'delete':
-      return 'DELETE';
-  }
+const RISK_ORDER: RiskLevel[] = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
+
+function escalateRisk(a: RiskLevel, b: RiskLevel): RiskLevel {
+  return RISK_ORDER.indexOf(a) >= RISK_ORDER.indexOf(b) ? a : b;
 }
 
-function buildRiskFactors(
-  parsed: ParsedSecretCommand,
-  leaks: ReturnType<typeof detectLeaks>,
-): RiskFactor[] {
-  const factors: RiskFactor[] = [];
-
-  if (parsed.hasPlaintextSecret) {
-    factors.push({
-      code: 'PLAINTEXT_SECRET_IN_COMMAND',
-      severity: 'CRITICAL',
-      description: 'Secret value detected in plaintext within the command',
-    });
-  }
-
-  if (leaks.isExfiltration) {
-    factors.push({
-      code: 'EXFILTRATION_RISK',
-      severity: 'CRITICAL',
-      description: 'Command pipes output to an external sink (curl, wget, nc, file redirect)',
-    });
-  }
-
-  if (leaks.hasLeak) {
-    factors.push({
-      code: 'SECRET_PATTERN_DETECTED',
-      severity: 'CRITICAL',
-      description: `Known secret value pattern detected: ${leaks.patterns.join(', ')}`,
-    });
-  }
-
-  if (parsed.isRawOutput && parsed.environment === 'production') {
-    factors.push({
-      code: 'RAW_OUTPUT_ON_PRODUCTION',
-      severity: 'HIGH',
-      description: 'Raw secret output requested in production environment',
-    });
-  }
-
-  if (parsed.isWildcard && parsed.action === 'delete') {
-    factors.push({
-      code: 'WILDCARD_DELETE',
-      severity: 'CRITICAL',
-      description: 'Wildcard delete operation targets multiple secrets',
-    });
-  }
-
-  if (parsed.isWildcard && parsed.environment === 'production') {
-    factors.push({
-      code: 'WILDCARD_PRODUCTION_ACCESS',
-      severity: 'HIGH',
-      description: 'Wildcard operation in production environment',
-    });
-  }
-
-  if (parsed.action === 'delete') {
-    factors.push({
-      code: 'DESTRUCTIVE_OPERATION',
-      severity: 'HIGH',
-      description: 'Secret deletion is irreversible',
-    });
-  }
-
-  if (parsed.action === 'rotate') {
-    factors.push({
-      code: 'ROTATION_IMPACT',
-      severity: 'MEDIUM',
-      description: 'Secret rotation may affect all services using this secret',
-    });
-  }
-
-  if (parsed.action === 'read' && parsed.environment === 'production') {
-    factors.push({
-      code: 'PRODUCTION_SECRET_READ',
-      severity: 'MEDIUM',
-      description: 'Reading a production secret',
-    });
-  }
-
-  return factors;
+function matchesRule(intent: ParsedSecretCommand, rule: SecretPolicyRule): boolean {
+  const m = rule.match;
+  if (m.tools && !m.tools.includes(intent.tool)) return false;
+  if (m.actions && !m.actions.includes(intent.action)) return false;
+  if (m.scopes && !m.scopes.includes(intent.scope)) return false;
+  if (m.exposesValue !== undefined && intent.exposesValue !== m.exposesValue) return false;
+  if (m.isOverwrite !== undefined && intent.isOverwrite !== m.isOverwrite) return false;
+  if (m.isProduction !== undefined && intent.isProduction !== m.isProduction) return false;
+  if (m.isForce !== undefined && intent.isForce !== m.isForce) return false;
+  return true;
 }
 
-/**
- * Splits a shell command string into [executable, ...args] respecting quoted tokens.
- */
-function splitArgs(command: string): string[] {
-  const result: string[] = [];
-  let current = '';
-  let inSingle = false;
-  let inDouble = false;
+export function evaluateSecretPolicy(
+  intent: ParsedSecretCommand,
+  policy: SecretPolicy,
+): SecretPolicyDecision {
+  const matchedRules: SecretPolicyRule[] = [];
+  let allowed = true;
+  let requiresDryRun = false;
+  let requiresApproval = false;
+  let currentRisk: RiskLevel = 'LOW';
+  const messages: string[] = [];
 
-  for (const ch of command) {
-    if (ch === "'" && !inDouble) {
-      inSingle = !inSingle;
-    } else if (ch === '"' && !inSingle) {
-      inDouble = !inDouble;
-    } else if (ch === ' ' && !inSingle && !inDouble) {
-      if (current) {
-        result.push(current);
-        current = '';
-      }
+  for (const rule of policy.rules) {
+    if (!matchesRule(intent, rule)) continue;
+    matchedRules.push(rule);
+    currentRisk = escalateRisk(currentRisk, rule.riskLevel);
+
+    switch (rule.action) {
+      case 'deny':
+        allowed = false;
+        messages.push(rule.message ?? `Denied by rule: ${rule.id}`);
+        break;
+      case 'require_approval':
+        requiresApproval = true;
+        messages.push(rule.message ?? `Approval required: ${rule.id}`);
+        break;
+      case 'require_dry_run':
+        requiresDryRun = true;
+        messages.push(rule.message ?? `Dry-run required: ${rule.id}`);
+        break;
+      case 'allow':
+        messages.push(rule.message ?? `Allowed: ${rule.id}`);
+        break;
+    }
+  }
+
+  if (matchedRules.length === 0) {
+    currentRisk = policy.defaults.defaultRiskLevel;
+    if (!policy.defaults.allowUnknown) {
+      allowed = false;
+      messages.push('No matching rule found and allowUnknown is false');
     } else {
-      current += ch;
+      messages.push('No matching rule — default: allowed');
     }
   }
 
-  if (current) result.push(current);
-  return result;
+  // CRITICAL risk always forces dry-run + approval
+  if (currentRisk === 'CRITICAL') {
+    requiresDryRun = true;
+    requiresApproval = true;
+  }
+
+  return {
+    allowed,
+    riskLevel: currentRisk,
+    requiresDryRun,
+    requiresApproval,
+    matchedRules,
+    message: messages.join('; '),
+  };
 }
 
-// ─── Adapter ──────────────────────────────────────────────────────────────────
+// ─── Argv builder ─────────────────────────────────────────────────────────────
+
+function buildArgv(intent: ParsedSecretCommand): string[] {
+  const sanitized = intent.raw.replace(/[;&|`$]/g, '');
+  return sanitized.split(/\s+/).filter(Boolean);
+}
+
+// ─── Adapter ───────────────────────────────────────────────────────────────────
 
 /**
- * SecretsAdapter — SafeAdapter implementation for secret management systems.
+ * SecretsAdapter — SafeAdapter<ParsedSecretCommand, SecretSnapshot>
  *
- * Supports HashiCorp Vault, AWS Secrets Manager, AWS SSM Parameter Store,
- * GCP Secret Manager, Azure Key Vault, Kubernetes secrets, Docker secrets,
- * and environment variables.
- *
- * Enforcement layers applied in sandbox():
- *   1. Leak detection  — aborts if a secret value is embedded in the command
- *   2. Exfiltration    — aborts if the command pipes output externally
- *   3. Path allowlist/blocklist — restricts accessible secret paths
- *   4. Sandbox simulation — wildcard deletes, raw output on production, etc.
- *
- * Live execution (dryRunOnly: false) spawns the command via spawnSync.
- * Default is dryRunOnly: true — validates and audits without executing.
+ * Implements the 4-method gate interface for secrets management operations:
+ *   parseIntent  → classify the raw command (vault, aws, gcloud, az, kubectl, docker, export)
+ *   sandbox      → validate without executing (static analysis + leak detection)
+ *   execute      → run the command via spawnSync
+ *   rollback     → restore from snapshot (where supported)
  */
-export class SecretsAdapter implements SafeAdapter {
-  readonly domain = 'secrets';
+export class SecretsAdapter implements SafeAdapter<ParsedSecretCommand, SecretSnapshot> {
+  readonly name = 'secrets';
 
-  constructor(private readonly options: SecretsAdapterOptions = {}) {}
-
-  async ping(): Promise<void> {
-    if (this.options.allowedPaths !== undefined && this.options.blockedPaths !== undefined) {
-      for (const allowed of this.options.allowedPaths) {
-        if (this.options.blockedPaths.some((b) => b.startsWith(allowed) || allowed.startsWith(b))) {
-          throw new Error(
-            `SecretsAdapter misconfiguration: path '${allowed}' appears in both allowedPaths and blockedPaths`,
-          );
-        }
-      }
-    }
+  parseIntent(raw: string): ParsedSecretCommand {
+    return parseSecretCommand(raw);
   }
 
-  async parseIntent(raw: string): Promise<SafeIntent> {
-    const parsed = parseSecretCommand(raw);
-    const leaks = detectLeaks(raw);
-    const riskFactors = buildRiskFactors(parsed, leaks);
-
-    const type = actionToOperationType(parsed.action);
-    const scope: Scope = parsed.isWildcard ? 'all' : 'single';
-    const target: Target = {
-      name: parsed.secretPath || '(none)',
-      type: 'secret',
-      affectedResources: parsed.secretPath ? [parsed.secretPath] : [],
-    };
-
-    return {
-      domain: 'secrets',
-      type,
-      raw,
-      target,
-      scope,
-      riskFactors,
-      ast: parsed,
-      // backward-compat fields
-      tables: parsed.secretPath ? [parsed.secretPath] : [],
-      hasWhereClause: !parsed.isWildcard,
-      estimatedRowsAffected: null,
-      isDestructive: parsed.action === 'delete',
-      isMassive: parsed.isWildcard,
-      metadata: {
-        tool: parsed.tool,
-        action: parsed.action,
-        environment: parsed.environment,
-      },
-    };
+  async sandbox(intent: ParsedSecretCommand): Promise<SimulationResult> {
+    return simulateSecretCommand(intent);
   }
 
-  async sandbox(intent: SafeIntent): Promise<SandboxResult> {
+  async execute(intent: ParsedSecretCommand): Promise<AdapterExecutionResult> {
     const start = Date.now();
-    const parsed = intent.ast as ParsedSecretCommand;
+    const argv = buildArgv(intent);
+    const [cli, ...args] = argv;
 
-    // ── DENY: critical risk factors ────────────────────────────────────────
-    const criticalRisks = intent.riskFactors.filter((r) => r.severity === 'CRITICAL');
-    if (criticalRisks.length > 0) {
-      const reasons = criticalRisks.map((r) => r.description).join('; ');
+    if (!cli) {
       return {
-        feasible: false,
-        estimatedRowsAffected: 0,
-        executionPlan: `DENIED: ${reasons}`,
-        warnings: criticalRisks.map((r) => r.description),
+        success: false,
+        output: '',
+        resourcesAffected: 0,
         durationMs: Date.now() - start,
+        error: 'Empty command after sanitization',
       };
     }
 
-    // ── Blocklist check ────────────────────────────────────────────────────
-    if (
-      parsed.secretPath &&
-      this.options.blockedPaths?.some((b) => parsed.secretPath.startsWith(b))
-    ) {
-      return {
-        feasible: false,
-        estimatedRowsAffected: 0,
-        executionPlan: `DENIED: Secret path '${parsed.secretPath}' is in the blocked paths list.`,
-        warnings: [`Path '${parsed.secretPath}' is blocked`],
-        durationMs: Date.now() - start,
-      };
-    }
-
-    // ── Allowlist check ────────────────────────────────────────────────────
-    if (
-      parsed.secretPath &&
-      this.options.allowedPaths !== undefined &&
-      this.options.allowedPaths.length > 0
-    ) {
-      const isAllowed = this.options.allowedPaths.some((a) => parsed.secretPath.startsWith(a));
-      if (!isAllowed) {
-        return {
-          feasible: false,
-          estimatedRowsAffected: 0,
-          executionPlan: `DENIED: Secret path '${parsed.secretPath}' is not in the allowed paths list.`,
-          warnings: [`Path '${parsed.secretPath}' not in allowlist`],
-          durationMs: Date.now() - start,
-        };
-      }
-    }
-
-    // ── Sandbox simulation ─────────────────────────────────────────────────
-    const secretSandbox = new SecretSandbox(this.options);
-    const outcome = secretSandbox.simulate(parsed);
-
-    return {
-      feasible: outcome.feasible,
-      estimatedRowsAffected: outcome.feasible ? 1 : 0,
-      executionPlan: outcome.plan,
-      warnings: outcome.validationErrors,
-      durationMs: Date.now() - start,
-    };
-  }
-
-  async execute(
-    intent: SafeIntent,
-    _config: SafeExecutorConfig,
-    _estimatedRows: number | null,
-  ): Promise<ExecutionResult> {
-    const start = Date.now();
-    const parsed = intent.ast as ParsedSecretCommand;
-    const leaks = detectLeaks(intent.raw);
-
-    // Final safety gate — never execute if leaks or exfiltration are detected
-    if (parsed.hasPlaintextSecret) {
-      throw new Error('Execution blocked: secret value detected in plaintext within the command');
-    }
-    if (leaks.isExfiltration) {
-      throw new Error('Execution blocked: exfiltration pattern detected in command');
-    }
-    if (leaks.hasLeak) {
-      throw new Error(
-        `Execution blocked: secret value pattern detected (${leaks.patterns.join(', ')})`,
-      );
-    }
-
-    // Dry-run mode: simulate success without executing
-    if (this.options.dryRunOnly !== false) {
-      return {
-        status: 'dry_run',
-        rowsAffected: 1,
-        durationMs: Date.now() - start,
-        savepointUsed: false,
-        rolledBack: false,
-      };
-    }
-
-    // Live mode: spawn the command
-    const parts = splitArgs(intent.raw);
-    const executable = parts[0];
-    if (!executable) {
-      throw new Error('Execution blocked: empty command after parsing');
-    }
-
-    const result = spawnSync(executable, parts.slice(1), {
-      encoding: 'utf-8',
-      timeout: 30_000,
-      shell: false, // never use shell — prevents injection
+    const result = spawnSync(cli, args, {
+      timeout: 30_000, // shorter timeout for secrets ops
+      encoding: 'utf8',
+      shell: false,
     });
+
+    const durationMs = Date.now() - start;
 
     if (result.error) {
       return {
-        status: 'failed',
-        rowsAffected: 0,
-        durationMs: Date.now() - start,
-        savepointUsed: false,
-        rolledBack: false,
-        error: `Command spawn failed: ${result.error.message}. Is '${executable}' installed and in PATH?`,
+        success: false,
+        output: '',
+        resourcesAffected: 0,
+        durationMs,
+        error: result.error.message,
       };
     }
 
+    const output = [result.stdout, result.stderr]
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+
     if (result.status !== 0) {
-      const stderr = result.stderr?.trim() ?? '';
-      const exitInfo =
-        result.status !== null ? `exit ${result.status}` : `signal ${result.signal ?? 'unknown'}`;
       return {
-        status: 'failed',
-        rowsAffected: 0,
-        durationMs: Date.now() - start,
-        savepointUsed: false,
-        rolledBack: false,
-        error: `Command failed (${exitInfo})${stderr ? `: ${stderr}` : ''}`,
+        success: false,
+        output,
+        resourcesAffected: 0,
+        durationMs,
+        error: `Process exited with code ${result.status}`,
       };
     }
 
     return {
-      status: 'success',
-      rowsAffected: 1,
-      durationMs: Date.now() - start,
-      savepointUsed: false,
-      rolledBack: false,
+      success: true,
+      output,
+      resourcesAffected: 1,
+      durationMs,
     };
   }
 
-  async close(): Promise<void> {}
+  async rollback(intent: ParsedSecretCommand, snapshot: SecretSnapshot): Promise<void> {
+    if (!snapshot.previousVersionId) {
+      throw new Error(
+        `Automatic rollback is not supported for action '${intent.action}'. ` +
+        `A snapshot was captured at ${snapshot.timestamp.toISOString()} ` +
+        `(id: ${snapshot.commandId}). Pre-execution state: ${snapshot.preState}. ` +
+        `Manual intervention is required.`,
+      );
+    }
+
+    // For versioned secret stores, we could restore the previous version
+    // This is a placeholder — actual implementation depends on the secret store
+    throw new Error(
+      `Automatic rollback to version '${snapshot.previousVersionId}' ` +
+      `requires manual intervention. Snapshot: ${snapshot.preState}`,
+    );
+  }
 }
