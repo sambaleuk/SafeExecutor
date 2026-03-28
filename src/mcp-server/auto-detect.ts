@@ -13,6 +13,24 @@ export function detectDomain(command: string): string {
   if (SQL_KEYWORDS.test(cmd)) return 'sql';
   if (cmd.startsWith('git ')) return 'git';
   if (cmd.startsWith('kubectl ') || cmd.startsWith('helm ')) return 'kubernetes';
+  // Secrets: check before generic cloud — aws/az sub-commands can target secrets services
+  if (
+    cmd.startsWith('vault ') ||
+    cmd.includes('secretsmanager') ||
+    cmd.includes('keyvault') ||
+    /\bssm\b/.test(cmd)
+  )
+    return 'secrets';
+  // Queue: check before generic cloud — aws sqs/sns map to queue domain
+  if (
+    cmd.startsWith('kafka-') ||
+    cmd.startsWith('rabbitmq') ||
+    cmd.startsWith('redis-cli') ||
+    /\bsqs\b/.test(cmd) ||
+    /\bsns\b/.test(cmd) ||
+    cmd.includes('pubsub')
+  )
+    return 'queue';
   if (
     cmd.startsWith('terraform ') ||
     cmd.startsWith('aws ') ||
@@ -27,28 +45,12 @@ export function detectDomain(command: string): string {
   )
     return 'cicd';
   if (
-    cmd.startsWith('vault ') ||
-    cmd.includes('secretsmanager') ||
-    cmd.includes('ssm') ||
-    cmd.includes('keyvault')
-  )
-    return 'secrets';
-  if (
     cmd.startsWith('iptables ') ||
     cmd.startsWith('ufw ') ||
     cmd.startsWith('ip ') ||
     cmd.startsWith('nmap ')
   )
     return 'network';
-  if (
-    cmd.startsWith('kafka-') ||
-    cmd.startsWith('rabbitmq') ||
-    cmd.startsWith('redis-cli') ||
-    cmd.includes('sqs') ||
-    cmd.includes('sns') ||
-    cmd.includes('pubsub')
-  )
-    return 'queue';
   if (cmd.startsWith('curl ') || cmd.startsWith('http') || HTTP_METHOD.test(cmd)) return 'api';
   if (
     cmd.startsWith('rm ') ||

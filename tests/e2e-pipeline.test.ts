@@ -4,23 +4,10 @@
  * Tests the full pipeline: auto-detect -> parse -> risk classification
  * through the three exported tool functions: safeExecute, safeAnalyze, safePolicyCheck.
  *
- * IMPORTANT: tools.ts has property-name mismatches against several adapter return types.
- * At runtime (JS semantics), accessing a non-existent property yields `undefined`.
- * These tests are written to match that ACTUAL runtime behavior:
- *
- *   - SQL / Kubernetes: SafeIntent has `type` not `operationType`, no `riskLevel` field
- *     -> operation=undefined, riskLevel=undefined, blocked=false
- *   - Cloud: CloudIntent has `actionType` not `operationType`, no `targets`
- *     -> operation=undefined, targets=[]
- *   - Filesystem: uses `intent.denied` instead of `intent.isDenied`, no `targets`
- *     -> blocked=undefined (falsy), targets=[]
- *   - All non-SQL/K8s domains compare riskLevel to lowercase ('critical','high')
- *     but adapters return UPPERCASE -> blocked is always false
- *   - CICD/Secrets/Network: `intent.operation`/`intent.commandType`/`intent.targets`
- *     don't exist on their return types -> operation=undefined, targets=[]
- *
- * To run these tests, set `diagnostics: false` in ts-jest transform options
- * (jest.config.cjs) because tools.ts has TypeScript compilation errors.
+ * All tests verify actual runtime behavior after tools.ts property-name fixes:
+ * - All domains now return correct operation, riskLevel, blocked, and targets fields.
+ * - Blocking is functional: dangerous commands are blocked (blocked=true, policy_decision='BLOCKED').
+ * - aws secretsmanager / aws ssm / az keyvault route to 'secrets' (not 'cloud').
  */
 
 import { safeExecute, safeAnalyze, safePolicyCheck } from '../src/mcp-server/tools.js';
@@ -79,13 +66,10 @@ describe('Domain Routing', () => {
     ['https://example.com/resource', 'api'],
 
     // Secrets
-    // NOTE: 'aws secretsmanager', 'aws ssm', 'az keyvault' all start with 'aws '/'az '
-    // which matches cloud detection before secrets detection in auto-detect.ts.
-    // Only 'vault ...' is unambiguously detected as secrets.
     ['vault read secret/data/prod/db', 'secrets'],
-    ['aws secretsmanager get-secret-value --secret-id prod/api-key', 'cloud'],
-    ['aws ssm get-parameter --name /prod/db-password', 'cloud'],
-    ['az keyvault secret show --name api-key', 'cloud'],
+    ['aws secretsmanager get-secret-value --secret-id prod/api-key', 'secrets'],
+    ['aws ssm get-parameter --name /prod/db-password', 'secrets'],
+    ['az keyvault secret show --name api-key', 'secrets'],
 
     // Network
     ['iptables -L', 'network'],
@@ -116,144 +100,127 @@ describe('Domain Routing', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('Blocking behavior for dangerous commands', () => {
-  /**
-   * Because of property-name mismatches in tools.ts:
-   *
-   * - SQL: `intent.riskLevel` is undefined (SafeIntent has no riskLevel field)
-   *   -> blocked = false always
-   * - Filesystem: `intent.denied` is undefined (should be `intent.isDenied`)
-   *   -> blocked = undefined (falsy)
-   * - Cloud/CICD/API/Secrets/Network: compares UPPERCASE riskLevel to lowercase strings
-   *   ('critical', 'high') -> blocked = false always
-   * - Kubernetes: SafeIntent has no riskLevel field -> blocked = false always
-   *
-   * All policy_decision values will be 'ALLOWED' due to these mismatches.
-   */
-
-  describe('SQL destructive commands are NOT blocked (missing riskLevel on SafeIntent)', () => {
-    test('DELETE FROM users (no WHERE) -> blocked=false', async () => {
+  describe('SQL destructive commands ARE blocked', () => {
+    test('DELETE FROM users (no WHERE) -> blocked=true', async () => {
       const result = await safeExecute('DELETE FROM users');
       expect(result.domain).toBe('sql');
-      expect(result.riskLevel).toBeUndefined();
-      expect(result.blocked).toBe(false);
-      expect(result.policy_decision).toBe('ALLOWED');
+      expect(result.riskLevel).toMatch(/^(HIGH|CRITICAL)$/);
+      expect(result.blocked).toBe(true);
+      expect(result.policy_decision).toBe('BLOCKED');
     });
 
-    test('DROP TABLE production_data -> blocked=false', async () => {
+    test('DROP TABLE production_data -> blocked=true', async () => {
       const result = await safeExecute('DROP TABLE production_data');
       expect(result.domain).toBe('sql');
-      expect(result.riskLevel).toBeUndefined();
-      expect(result.blocked).toBe(false);
-      expect(result.policy_decision).toBe('ALLOWED');
+      expect(result.riskLevel).toMatch(/^(HIGH|CRITICAL)$/);
+      expect(result.blocked).toBe(true);
+      expect(result.policy_decision).toBe('BLOCKED');
     });
 
-    test('TRUNCATE TABLE users -> blocked=false', async () => {
+    test('TRUNCATE TABLE users -> blocked=true', async () => {
       const result = await safeExecute('TRUNCATE TABLE users');
       expect(result.domain).toBe('sql');
-      expect(result.blocked).toBe(false);
-      expect(result.policy_decision).toBe('ALLOWED');
+      expect(result.blocked).toBe(true);
+      expect(result.policy_decision).toBe('BLOCKED');
     });
   });
 
-  describe('Filesystem destructive commands are NOT blocked (wrong property name)', () => {
-    test('rm -rf / -> blocked=undefined (intent.denied instead of intent.isDenied)', async () => {
+  describe('Filesystem destructive commands ARE blocked', () => {
+    test('rm -rf / -> blocked=true', async () => {
       const result = await safeExecute('rm -rf /');
       expect(result.domain).toBe('filesystem');
-      expect(result.blocked).toBeUndefined();
-      // undefined is falsy, so policy_decision is 'ALLOWED'
-      expect(result.policy_decision).toBe('ALLOWED');
+      expect(result.blocked).toBe(true);
+      expect(result.policy_decision).toBe('BLOCKED');
     });
 
-    test('rm -rf /etc -> blocked=undefined', async () => {
+    test('rm -rf /etc -> blocked=true', async () => {
       const result = await safeExecute('rm -rf /etc');
       expect(result.domain).toBe('filesystem');
-      expect(result.blocked).toBeUndefined();
-      expect(result.policy_decision).toBe('ALLOWED');
+      expect(result.blocked).toBe(true);
+      expect(result.policy_decision).toBe('BLOCKED');
     });
 
-    test('dd if=/dev/zero of=/dev/sda -> blocked=undefined', async () => {
+    test('dd if=/dev/zero of=/dev/sda -> blocked=true', async () => {
       const result = await safeExecute('dd if=/dev/zero of=/dev/sda');
       expect(result.domain).toBe('filesystem');
-      expect(result.blocked).toBeUndefined();
-      expect(result.policy_decision).toBe('ALLOWED');
+      expect(result.blocked).toBe(true);
+      expect(result.policy_decision).toBe('BLOCKED');
     });
   });
 
-  describe('Cloud destructive commands are NOT blocked (case mismatch)', () => {
-    test('terraform destroy -> blocked=false', async () => {
+  describe('Cloud destructive commands ARE blocked', () => {
+    test('terraform destroy -> blocked=true', async () => {
       const result = await safeExecute('terraform destroy');
       expect(result.domain).toBe('cloud');
-      // riskLevel is UPPERCASE from CloudIntent, compared to lowercase in tools.ts
       expect(result.riskLevel).toMatch(/^(HIGH|CRITICAL)$/);
-      expect(result.blocked).toBe(false);
-      expect(result.policy_decision).toBe('ALLOWED');
+      expect(result.blocked).toBe(true);
+      expect(result.policy_decision).toBe('BLOCKED');
     });
 
-    test('aws ec2 terminate-instances -> blocked=false', async () => {
+    test('aws ec2 terminate-instances -> blocked=true', async () => {
       const result = await safeExecute('aws ec2 terminate-instances --instance-ids i-1234');
       expect(result.domain).toBe('cloud');
-      expect(result.blocked).toBe(false);
-      expect(result.policy_decision).toBe('ALLOWED');
+      expect(result.blocked).toBe(true);
+      expect(result.policy_decision).toBe('BLOCKED');
     });
   });
 
-  describe('Kubernetes destructive commands are NOT blocked (missing riskLevel)', () => {
-    test('kubectl delete namespace kube-system -> blocked=false', async () => {
+  describe('Kubernetes destructive commands ARE blocked', () => {
+    test('kubectl delete namespace kube-system -> blocked=true', async () => {
       const result = await safeExecute('kubectl delete namespace kube-system');
       expect(result.domain).toBe('kubernetes');
-      expect(result.riskLevel).toBeUndefined();
-      expect(result.blocked).toBe(false);
-      expect(result.policy_decision).toBe('ALLOWED');
+      expect(result.riskLevel).toMatch(/^(HIGH|CRITICAL)$/);
+      expect(result.blocked).toBe(true);
+      expect(result.policy_decision).toBe('BLOCKED');
     });
 
-    test('helm uninstall my-release -> blocked=false', async () => {
+    test('helm uninstall my-release -> blocked=true', async () => {
       const result = await safeExecute('helm uninstall my-release');
       expect(result.domain).toBe('kubernetes');
-      expect(result.blocked).toBe(false);
-      expect(result.policy_decision).toBe('ALLOWED');
+      expect(result.blocked).toBe(true);
+      expect(result.policy_decision).toBe('BLOCKED');
     });
   });
 
-  describe('Network destructive commands are NOT blocked (case mismatch)', () => {
-    test('iptables -F INPUT -> blocked=false', async () => {
+  describe('Network destructive commands ARE blocked', () => {
+    test('iptables -F INPUT -> blocked=true', async () => {
       const result = await safeExecute('iptables -F INPUT');
       expect(result.domain).toBe('network');
       expect(result.riskLevel).toMatch(/^(HIGH|CRITICAL)$/);
-      expect(result.blocked).toBe(false);
-      expect(result.policy_decision).toBe('ALLOWED');
+      expect(result.blocked).toBe(true);
+      expect(result.policy_decision).toBe('BLOCKED');
     });
 
-    test('ip link set eth0 down -> blocked=false', async () => {
+    test('ip link set eth0 down -> blocked=true', async () => {
       const result = await safeExecute('ip link set eth0 down');
       expect(result.domain).toBe('network');
-      expect(result.blocked).toBe(false);
-      expect(result.policy_decision).toBe('ALLOWED');
+      expect(result.blocked).toBe(true);
+      expect(result.policy_decision).toBe('BLOCKED');
     });
 
-    test('ufw disable -> blocked=false', async () => {
+    test('ufw disable -> blocked=true', async () => {
       const result = await safeExecute('ufw disable');
       expect(result.domain).toBe('network');
-      expect(result.blocked).toBe(false);
-      expect(result.policy_decision).toBe('ALLOWED');
+      expect(result.blocked).toBe(true);
+      expect(result.policy_decision).toBe('BLOCKED');
     });
   });
 
-  describe('CICD dangerous commands are NOT blocked (case mismatch)', () => {
-    test('docker run --privileged -> blocked=false', async () => {
+  describe('CICD dangerous commands ARE blocked', () => {
+    test('docker run --privileged -> blocked=true', async () => {
       const result = await safeExecute('docker run --privileged -v /:/host alpine');
       expect(result.domain).toBe('cicd');
-      expect(result.blocked).toBe(false);
-      expect(result.policy_decision).toBe('ALLOWED');
+      expect(result.blocked).toBe(true);
+      expect(result.policy_decision).toBe('BLOCKED');
     });
   });
 
-  describe('API destructive commands are NOT blocked (case mismatch)', () => {
-    test('curl -X DELETE to admin endpoint -> blocked=false', async () => {
+  describe('API destructive commands ARE blocked', () => {
+    test('curl -X DELETE to admin endpoint -> blocked=true', async () => {
       const result = await safeExecute('curl -X DELETE https://api.example.com/admin/users/123');
       expect(result.domain).toBe('api');
-      // DELETE + admin category escalates to CRITICAL, but compared to lowercase
-      expect(result.blocked).toBe(false);
-      expect(result.policy_decision).toBe('ALLOWED');
+      expect(result.blocked).toBe(true);
+      expect(result.policy_decision).toBe('BLOCKED');
     });
 
     test('DELETE keyword routes to SQL, not API (regex precedence)', async () => {
@@ -263,12 +230,12 @@ describe('Blocking behavior for dangerous commands', () => {
     });
   });
 
-  describe('Secrets destructive commands are NOT blocked (case mismatch)', () => {
-    test('vault delete secret -> blocked=false', async () => {
+  describe('Secrets destructive commands ARE blocked', () => {
+    test('vault delete secret -> blocked=true', async () => {
       const result = await safeExecute('vault delete secret/prod/api-key');
       expect(result.domain).toBe('secrets');
-      expect(result.blocked).toBe(false);
-      expect(result.policy_decision).toBe('ALLOWED');
+      expect(result.blocked).toBe(true);
+      expect(result.policy_decision).toBe('BLOCKED');
     });
   });
 });
@@ -358,24 +325,19 @@ describe('Low-risk commands pass through', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('Risk level classification', () => {
-  /**
-   * SQL and Kubernetes return SafeIntent which has no riskLevel field,
-   * so riskLevel is always undefined for those domains.
-   */
-
-  test('SQL SELECT -> riskLevel=undefined', async () => {
+  test('SQL SELECT -> riskLevel=LOW', async () => {
     const result = await safeExecute('SELECT * FROM users');
-    expect(result.riskLevel).toBeUndefined();
+    expect(result.riskLevel).toBe('LOW');
   });
 
-  test('SQL DELETE no WHERE -> riskLevel=undefined', async () => {
+  test('SQL DELETE no WHERE -> riskLevel=CRITICAL', async () => {
     const result = await safeExecute('DELETE FROM users');
-    expect(result.riskLevel).toBeUndefined();
+    expect(result.riskLevel).toBe('CRITICAL');
   });
 
-  test('SQL DROP TABLE -> riskLevel=undefined', async () => {
+  test('SQL DROP TABLE -> riskLevel is HIGH or CRITICAL', async () => {
     const result = await safeExecute('DROP TABLE users');
-    expect(result.riskLevel).toBeUndefined();
+    expect(['HIGH', 'CRITICAL']).toContain(result.riskLevel);
   });
 
   // Filesystem has a proper riskLevel field
@@ -410,15 +372,15 @@ describe('Risk level classification', () => {
     expect(['HIGH', 'CRITICAL']).toContain(result.riskLevel);
   });
 
-  // Kubernetes riskLevel is undefined (SafeIntent)
-  test('kubectl delete namespace kube-system -> riskLevel=undefined', async () => {
+  // Kubernetes riskLevel is properly set
+  test('kubectl delete namespace kube-system -> riskLevel is HIGH or CRITICAL', async () => {
     const result = await safeExecute('kubectl delete namespace kube-system');
-    expect(result.riskLevel).toBeUndefined();
+    expect(['HIGH', 'CRITICAL']).toContain(result.riskLevel);
   });
 
-  test('kubectl get pods -> riskLevel=undefined', async () => {
+  test('kubectl get pods -> riskLevel=LOW', async () => {
     const result = await safeExecute('kubectl get pods');
-    expect(result.riskLevel).toBeUndefined();
+    expect(result.riskLevel).toBe('LOW');
   });
 
   // API has proper riskLevel
@@ -530,10 +492,9 @@ describe('Cross-domain mixed commands (50 commands)', () => {
     // Secrets (5)
     { command: 'vault list secret/data/', expectedDomain: 'secrets' },
     { command: 'vault write secret/data/app key=value', expectedDomain: 'secrets' },
-    // aws/az commands route to cloud before secrets check (detection order)
-    { command: 'aws secretsmanager list-secrets', expectedDomain: 'cloud' },
-    { command: 'aws ssm put-parameter --name /app/key --value secret123', expectedDomain: 'cloud' },
-    { command: 'az keyvault secret set --name api-key --value abc123', expectedDomain: 'cloud' },
+    { command: 'aws secretsmanager list-secrets', expectedDomain: 'secrets' },
+    { command: 'aws ssm put-parameter --name /app/key --value secret123', expectedDomain: 'secrets' },
+    { command: 'az keyvault secret set --name api-key --value abc123', expectedDomain: 'secrets' },
 
     // Network (4)
     { command: 'iptables -A INPUT -p tcp --dport 80 -j ACCEPT', expectedDomain: 'network' },
@@ -574,8 +535,7 @@ describe('safePolicyCheck', () => {
       const result = await safePolicyCheck('SELECT * FROM users');
       expect(result.allowed).toBe(true);
       expect(result.domain).toBe('sql');
-      // risk is undefined because SafeIntent has no riskLevel
-      expect(result.risk).toBeUndefined();
+      expect(result.risk).toBeDefined();
     });
 
     test('terraform plan', async () => {
@@ -624,47 +584,41 @@ describe('safePolicyCheck', () => {
     });
   });
 
-  describe('returns allowed=true even for dangerous commands (due to blocked always being false)', () => {
-    /**
-     * Because blocked is always false due to property-name mismatches,
-     * safePolicyCheck.allowed is always true (!false === true).
-     */
-
-    test('DROP TABLE -> allowed=true (blocked is always false for SQL)', async () => {
+  describe('returns allowed=false for dangerous commands', () => {
+    test('DROP TABLE -> allowed=false (blocked=true)', async () => {
       const result = await safePolicyCheck('DROP TABLE production_data');
-      expect(result.allowed).toBe(true);
+      expect(result.allowed).toBe(false);
       expect(result.domain).toBe('sql');
     });
 
-    test('terraform destroy -> allowed=true (case mismatch)', async () => {
+    test('terraform destroy -> allowed=false (CRITICAL risk)', async () => {
       const result = await safePolicyCheck('terraform destroy');
-      expect(result.allowed).toBe(true);
+      expect(result.allowed).toBe(false);
       expect(result.domain).toBe('cloud');
-      // riskLevel is there, just never blocks because of case mismatch
       expect(result.risk).toMatch(/^(HIGH|CRITICAL)$/);
     });
 
-    test('rm -rf / -> allowed=true (wrong property name)', async () => {
+    test('rm -rf / -> allowed=false (blocked=true)', async () => {
       const result = await safePolicyCheck('rm -rf /');
-      expect(result.allowed).toBe(true);
+      expect(result.allowed).toBe(false);
       expect(result.domain).toBe('filesystem');
     });
 
-    test('iptables -F INPUT -> allowed=true (case mismatch)', async () => {
+    test('iptables -F INPUT -> allowed=false (CRITICAL risk)', async () => {
       const result = await safePolicyCheck('iptables -F INPUT');
-      expect(result.allowed).toBe(true);
+      expect(result.allowed).toBe(false);
       expect(result.domain).toBe('network');
     });
 
-    test('curl -X DELETE to admin endpoint -> allowed=true', async () => {
+    test('curl -X DELETE to admin endpoint -> allowed=false', async () => {
       const result = await safePolicyCheck('curl -X DELETE https://api.example.com/admin/users');
-      expect(result.allowed).toBe(true);
+      expect(result.allowed).toBe(false);
       expect(result.domain).toBe('api');
     });
 
-    test('kubectl delete namespace kube-system -> allowed=true', async () => {
+    test('kubectl delete namespace kube-system -> allowed=false', async () => {
       const result = await safePolicyCheck('kubectl delete namespace kube-system');
-      expect(result.allowed).toBe(true);
+      expect(result.allowed).toBe(false);
       expect(result.domain).toBe('kubernetes');
     });
   });
@@ -688,12 +642,11 @@ describe('safePolicyCheck', () => {
       expect(result.reason).toBeTruthy();
     });
 
-    test('cloud reason is null (no riskFactors on CloudIntent)', async () => {
+    test('cloud reason for terraform destroy is populated (destructive operation)', async () => {
       const result = await safePolicyCheck('terraform destroy');
-      // tools.ts: intent.riskFactors?.map(...) -> undefined -> null
-      // safePolicyCheck: result.reason ?? 'Operation is within safe thresholds'
-      // result.reason is null, so fallback kicks in
-      expect(result.reason).toBe('Operation is within safe thresholds');
+      // reason comes from intent.isDestructive ? 'Destructive cloud operation' : null
+      // safePolicyCheck: result.reason ?? (blocked ? 'High-risk operation blocked by policy' : ...)
+      expect(result.reason).toBeTruthy();
     });
 
     test('unknown domain has reason about no parser', async () => {
@@ -753,9 +706,9 @@ describe('safeAnalyze', () => {
   test('SQL analyze matches execute behavior', async () => {
     const result = await safeAnalyze('DELETE FROM users');
     expect(result.domain).toBe('sql');
-    expect(result.riskLevel).toBeUndefined();
-    expect(result.blocked).toBe(false);
-    expect(result.policy_decision).toBe('ALLOWED');
+    expect(result.riskLevel).toMatch(/^(HIGH|CRITICAL)$/);
+    expect(result.blocked).toBe(true);
+    expect(result.policy_decision).toBe('BLOCKED');
     expect(result.note).toBe('Analysis only — no execution performed');
   });
 
@@ -851,37 +804,52 @@ describe('Unknown domain handling', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('Operation field mapping per domain', () => {
-  /**
-   * Verifies that the `operation` field reflects the actual runtime value
-   * based on property-name mismatches in tools.ts.
-   */
-
-  test('SQL: operation is undefined (SafeIntent.operationType does not exist)', async () => {
+  test('SQL SELECT: operation is SELECT', async () => {
     const result = await safeExecute('SELECT * FROM users');
-    expect(result.operation).toBeUndefined();
+    expect(result.operation).toBe('SELECT');
   });
 
-  test('Filesystem: operation is commandType (property exists)', async () => {
+  test('SQL DELETE: operation is DELETE', async () => {
+    const result = await safeExecute('DELETE FROM users');
+    expect(result.operation).toBe('DELETE');
+  });
+
+  test('Filesystem: operation is commandType (RM)', async () => {
     const result = await safeExecute('rm -rf /tmp/test');
     expect(result.operation).toBe('RM');
   });
 
-  test('Cloud: operation is undefined (CloudIntent has actionType not operationType)', async () => {
+  test('Cloud READ: operation is READ (terraform plan)', async () => {
     const result = await safeExecute('terraform plan');
-    expect(result.operation).toBeUndefined();
+    expect(result.operation).toBe('READ');
   });
 
-  test('Kubernetes: operation is undefined (SafeIntent has type not operationType)', async () => {
+  test('Cloud DESTROY: operation is DESTROY (terraform destroy)', async () => {
+    const result = await safeExecute('terraform destroy');
+    expect(result.operation).toBe('DESTROY');
+  });
+
+  test('Kubernetes: operation is verb (get)', async () => {
     const result = await safeExecute('kubectl get pods');
-    expect(result.operation).toBeUndefined();
+    expect(result.operation).toBe('get');
   });
 
-  test('CICD: operation is undefined (ParsedCicdCommand has action not operation)', async () => {
+  test('Kubernetes delete: operation is delete', async () => {
+    const result = await safeExecute('kubectl delete namespace kube-system');
+    expect(result.operation).toBe('delete');
+  });
+
+  test('CICD: operation is action (build)', async () => {
     const result = await safeExecute('docker build -t myapp .');
-    expect(result.operation).toBeUndefined();
+    expect(result.operation).toBe('build');
   });
 
-  test('API: operation is method (property exists on ParsedHttpRequest)', async () => {
+  test('CICD run: operation is run', async () => {
+    const result = await safeExecute('docker run --privileged -v /:/host alpine');
+    expect(result.operation).toBe('run');
+  });
+
+  test('API: operation is method (GET)', async () => {
     const result = await safeExecute('GET https://example.com/api');
     expect(result.operation).toBe('GET');
   });
@@ -891,14 +859,14 @@ describe('Operation field mapping per domain', () => {
     expect(result.operation).toBe('POST');
   });
 
-  test('Secrets: operation is undefined (has action not operation)', async () => {
+  test('Secrets: operation is action (read)', async () => {
     const result = await safeExecute('vault read secret/app');
-    expect(result.operation).toBeUndefined();
+    expect(result.operation).toBe('read');
   });
 
-  test('Network: operation is undefined (has tool/action not commandType)', async () => {
+  test('Network: operation is action (configure for iptables)', async () => {
     const result = await safeExecute('iptables -L');
-    expect(result.operation).toBeUndefined();
+    expect(result.operation).toBe('configure');
   });
 
   test('Unknown: operation is "unknown" (from default case)', async () => {
@@ -912,45 +880,45 @@ describe('Operation field mapping per domain', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('Targets field mapping per domain', () => {
-  test('SQL: targets is empty (SafeIntent has target not targets)', async () => {
+  test('SQL: targets contains table names', async () => {
     const result = await safeExecute('SELECT * FROM users');
-    expect(result.targets).toEqual([]);
+    expect(result.targets).toEqual(['users']);
   });
 
-  test('Filesystem: targets is empty (FilesystemIntent has targetPaths not targets)', async () => {
+  test('Filesystem: targets contains targetPaths', async () => {
     const result = await safeExecute('rm -rf /tmp/test');
-    expect(result.targets).toEqual([]);
+    expect(result.targets).toContain('/tmp/test');
   });
 
-  test('Cloud: targets is empty (CloudIntent has no targets property)', async () => {
+  test('Cloud: targets is array (may be empty for terraform plan)', async () => {
     const result = await safeExecute('terraform plan');
-    expect(result.targets).toEqual([]);
+    expect(Array.isArray(result.targets)).toBe(true);
   });
 
-  test('Kubernetes: targets is empty (SafeIntent has target not targets)', async () => {
+  test('Kubernetes: targets contains resource type and name', async () => {
     const result = await safeExecute('kubectl get pods');
-    expect(result.targets).toEqual([]);
+    expect(result.targets).toContain('pods');
   });
 
-  test('CICD: targets is empty (ParsedCicdCommand has no targets property)', async () => {
-    const result = await safeExecute('docker build .');
-    expect(result.targets).toEqual([]);
+  test('CICD: targets contains imageTag when present', async () => {
+    const result = await safeExecute('docker build -t myapp .');
+    expect(result.targets).toContain('myapp');
   });
 
-  test('API: targets contains the raw command (intent.url is undefined)', async () => {
-    const command = 'GET https://example.com/api/v1/users';
-    const result = await safeExecute(command);
-    expect(result.targets).toEqual([command]);
+  test('API: targets contains host+path', async () => {
+    const result = await safeExecute('GET https://example.com/api/v1/users');
+    expect(result.targets.length).toBeGreaterThan(0);
+    expect(result.targets[0]).toContain('example.com');
   });
 
-  test('Secrets: targets is empty (has secretPath not secretPaths)', async () => {
+  test('Secrets: targets contains secretPath', async () => {
     const result = await safeExecute('vault read secret/app');
-    expect(result.targets).toEqual([]);
+    expect(result.targets).toContain('secret/app');
   });
 
-  test('Network: targets is empty (ParsedNetworkCommand has no targets property)', async () => {
+  test('Network: targets is an array (may be empty if no targetHost)', async () => {
     const result = await safeExecute('iptables -L');
-    expect(result.targets).toEqual([]);
+    expect(Array.isArray(result.targets)).toBe(true);
   });
 
   test('Unknown: targets is empty (from default case)', async () => {
@@ -1023,9 +991,9 @@ describe('Reason field behavior across domains', () => {
     expect(result.reason).toBeTruthy();
   });
 
-  test('Cloud: reason is null (CloudIntent has no riskFactors)', async () => {
+  test('Cloud: reason is "Destructive cloud operation" for terraform destroy', async () => {
     const result = await safeExecute('terraform destroy');
-    expect(result.reason).toBeNull();
+    expect(result.reason).toBe('Destructive cloud operation');
   });
 
   test('Kubernetes: reason comes from SafeIntent riskFactors', async () => {

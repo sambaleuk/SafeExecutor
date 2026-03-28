@@ -5,31 +5,8 @@
  * supported domains, verifying return shape, domain routing, override
  * behavior, consistency between analyze/execute, and edge-case handling.
  *
- * IMPORTANT NOTES ON FIELD MISMATCHES
- * ------------------------------------
- * The tools.ts `parseWithDomain` function accesses adapter-specific fields
- * that sometimes do not match the actual return types of the adapter parsers.
- * These mismatches are documented inline and the tests verify the *actual*
- * runtime behavior (i.e. what the JS engine returns when accessing a
- * non-existent property: `undefined`).
- *
- * Known mismatches by domain:
- * - SQL:        SafeIntent has `type` (not `operationType`), no `riskLevel`,
- *               `target` (not `targets`).
- * - Cloud:      CloudIntent has `actionType` (not `operationType`), no
- *               `targets`, riskLevel is UPPERCASE but compared lowercase.
- * - Kubernetes: Same as SQL — returns SafeIntent.
- * - CI/CD:      ParsedCicdCommand has `action` (not `operation`), no
- *               `targets`, riskLevel UPPERCASE vs lowercase comparison.
- * - Secrets:    ParsedSecretCommand has `action` (not `operation`),
- *               `secretPath` (not `secretPaths`), UPPERCASE riskLevel.
- * - Network:    ParsedNetworkCommand has `action` (not `commandType`), no
- *               `targets` array, no `riskFactors`. riskLevel exists but
- *               UPPERCASE comparison applies.
- * - Filesystem: FilesystemIntent has `isDenied` (not `denied`),
- *               `targetPaths` (not `targets`). `commandType` works.
- * - API:        `method` works, `url` missing (host+path), riskLevel
- *               UPPERCASE. `riskFactors` missing.
+ * All tests verify actual runtime behavior after tools.ts fixes: all
+ * domains now return correct operation, riskLevel, blocked, and targets.
  */
 
 import { safeExecute, safeAnalyze, safePolicyCheck } from '../src/mcp-server/tools.js';
@@ -54,16 +31,10 @@ describe('safe_analyze — all 10 domains', () => {
     test('SELECT * FROM users', async () => {
       const r = await safeAnalyze('SELECT * FROM users');
       expect(r.domain).toBe('sql');
-      // SafeIntent has `type`, not `operationType` — tools.ts reads
-      // intent.operationType which resolves to undefined at runtime.
-      expect(r.operation).toBeUndefined();
-      // SafeIntent has no `riskLevel` field — also undefined.
-      expect(r.riskLevel).toBeUndefined();
-      // targets comes from intent.targets?.map(...) ?? [] — undefined?.map is
-      // undefined, so it falls through to [].
-      expect(r.targets).toEqual([]);
+      expect(r.operation).toBe('SELECT');
+      expect(r.riskLevel).toBeDefined();
+      expect(r.targets).toContain('users');
       expect(r.note).toBe(ANALYSIS_NOTE);
-      // blocked = (undefined === 'critical' || undefined === 'high') = false
       expect(r.blocked).toBe(false);
       expect(r.policy_decision).toBe('ALLOWED');
     });
@@ -71,11 +42,11 @@ describe('safe_analyze — all 10 domains', () => {
     test('DELETE FROM orders', async () => {
       const r = await safeAnalyze('DELETE FROM orders');
       expect(r.domain).toBe('sql');
-      expect(r.operation).toBeUndefined();
-      expect(r.riskLevel).toBeUndefined();
-      expect(r.blocked).toBe(false);
+      expect(r.operation).toBe('DELETE');
+      expect(r.riskLevel).toMatch(/^(HIGH|CRITICAL)$/);
+      expect(r.blocked).toBe(true);
       expect(r.note).toBe(ANALYSIS_NOTE);
-      expect(r.policy_decision).toBe('ALLOWED');
+      expect(r.policy_decision).toBe('BLOCKED');
     });
   });
 
@@ -85,14 +56,11 @@ describe('safe_analyze — all 10 domains', () => {
     test('rm -rf /home/test', async () => {
       const r = await safeAnalyze('rm -rf /home/test');
       expect(r.domain).toBe('filesystem');
-      // commandType exists on FilesystemIntent, so operation is defined.
       expect(r.operation).toBeDefined();
       expect(typeof r.operation).toBe('string');
-      // FilesystemIntent has riskLevel (uppercase enum).
       expect(r.riskLevel).toBeDefined();
-      // FilesystemIntent has `isDenied` not `denied` — intent.denied is
-      // undefined at runtime, so blocked = undefined.
-      expect(r.blocked).toBeUndefined();
+      // blocked is a proper boolean now
+      expect(typeof r.blocked).toBe('boolean');
       expect(r.note).toBe(ANALYSIS_NOTE);
       expectValidPolicyDecision(r.policy_decision);
     });
@@ -112,13 +80,9 @@ describe('safe_analyze — all 10 domains', () => {
     test('aws s3 ls', async () => {
       const r = await safeAnalyze('aws s3 ls');
       expect(r.domain).toBe('cloud');
-      // CloudIntent has `actionType`, not `operationType` — undefined.
-      expect(r.operation).toBeUndefined();
-      // riskLevel exists on CloudIntent (uppercase).
+      expect(r.operation).toBeDefined();
       expect(r.riskLevel).toBeDefined();
-      // targets: intent.targets is undefined, falls to [].
-      expect(r.targets).toEqual([]);
-      // blocked: UPPERCASE vs lowercase comparison always yields false.
+      expect(Array.isArray(r.targets)).toBe(true);
       expect(r.blocked).toBe(false);
       expect(r.note).toBe(ANALYSIS_NOTE);
       expect(r.policy_decision).toBe('ALLOWED');
@@ -127,12 +91,11 @@ describe('safe_analyze — all 10 domains', () => {
     test('terraform destroy', async () => {
       const r = await safeAnalyze('terraform destroy');
       expect(r.domain).toBe('cloud');
-      expect(r.operation).toBeUndefined();
-      // terraform destroy has riskLevel CRITICAL, but blocked is false
-      // because 'CRITICAL' !== 'critical'.
-      expect(r.blocked).toBe(false);
+      expect(r.operation).toBe('DESTROY');
+      // terraform destroy has riskLevel CRITICAL and is blocked
+      expect(r.blocked).toBe(true);
       expect(r.note).toBe(ANALYSIS_NOTE);
-      expect(r.policy_decision).toBe('ALLOWED');
+      expect(r.policy_decision).toBe('BLOCKED');
     });
   });
 
@@ -142,10 +105,8 @@ describe('safe_analyze — all 10 domains', () => {
     test('kubectl get pods', async () => {
       const r = await safeAnalyze('kubectl get pods');
       expect(r.domain).toBe('kubernetes');
-      // toSafeIntent returns SafeIntent which has `type` not `operationType`.
-      expect(r.operation).toBeUndefined();
-      // SafeIntent has no riskLevel.
-      expect(r.riskLevel).toBeUndefined();
+      expect(r.operation).toBe('get');
+      expect(r.riskLevel).toBeDefined();
       expect(r.note).toBe(ANALYSIS_NOTE);
       expect(r.policy_decision).toBe('ALLOWED');
     });
@@ -153,10 +114,10 @@ describe('safe_analyze — all 10 domains', () => {
     test('kubectl delete namespace prod', async () => {
       const r = await safeAnalyze('kubectl delete namespace prod');
       expect(r.domain).toBe('kubernetes');
-      expect(r.operation).toBeUndefined();
-      expect(r.blocked).toBe(false);
+      expect(r.operation).toBe('delete');
+      expect(r.blocked).toBe(true);
       expect(r.note).toBe(ANALYSIS_NOTE);
-      expect(r.policy_decision).toBe('ALLOWED');
+      expect(r.policy_decision).toBe('BLOCKED');
     });
   });
 
@@ -166,13 +127,9 @@ describe('safe_analyze — all 10 domains', () => {
     test('docker build -t app .', async () => {
       const r = await safeAnalyze('docker build -t app .');
       expect(r.domain).toBe('cicd');
-      // ParsedCicdCommand has `action` not `operation` — undefined.
-      expect(r.operation).toBeUndefined();
-      // riskLevel exists (uppercase).
+      expect(r.operation).toBe('build');
       expect(r.riskLevel).toBeDefined();
-      // targets: intent.targets is undefined, falls to [].
-      expect(r.targets).toEqual([]);
-      // blocked: UPPERCASE vs lowercase comparison, always false.
+      expect(Array.isArray(r.targets)).toBe(true);
       expect(r.blocked).toBe(false);
       expect(r.note).toBe(ANALYSIS_NOTE);
       expect(r.policy_decision).toBe('ALLOWED');
@@ -181,10 +138,10 @@ describe('safe_analyze — all 10 domains', () => {
     test('docker run --privileged alpine', async () => {
       const r = await safeAnalyze('docker run --privileged alpine');
       expect(r.domain).toBe('cicd');
-      expect(r.operation).toBeUndefined();
-      expect(r.blocked).toBe(false);
+      expect(r.operation).toBe('run');
+      expect(r.blocked).toBe(true);
       expect(r.note).toBe(ANALYSIS_NOTE);
-      expect(r.policy_decision).toBe('ALLOWED');
+      expect(r.policy_decision).toBe('BLOCKED');
     });
   });
 
@@ -197,9 +154,7 @@ describe('safe_analyze — all 10 domains', () => {
       // intent.method exists, so operation is defined.
       expect(r.operation).toBeDefined();
       expect(r.operation).toBe('GET');
-      // riskLevel exists (uppercase).
       expect(r.riskLevel).toBeDefined();
-      // blocked: UPPERCASE vs lowercase, always false.
       expect(r.blocked).toBe(false);
       expect(r.note).toBe(ANALYSIS_NOTE);
       expect(r.policy_decision).toBe('ALLOWED');
@@ -220,25 +175,19 @@ describe('safe_analyze — all 10 domains', () => {
     test('vault read secret/data/db', async () => {
       const r = await safeAnalyze('vault read secret/data/db');
       expect(r.domain).toBe('secrets');
-      // ParsedSecretCommand has `action` not `operation` — undefined.
-      expect(r.operation).toBeUndefined();
-      // riskLevel exists (uppercase).
+      expect(r.operation).toBe('read');
       expect(r.riskLevel).toBeDefined();
-      // secretPaths does not exist (it's secretPath singular) — undefined,
-      // falls to [].
-      expect(r.targets).toEqual([]);
-      // blocked: UPPERCASE vs lowercase, always false.
+      expect(r.targets).toContain('secret/data/db');
       expect(r.blocked).toBe(false);
       expect(r.note).toBe(ANALYSIS_NOTE);
       expect(r.policy_decision).toBe('ALLOWED');
     });
 
     test('aws secretsmanager get-secret-value --secret-id prod/db', async () => {
-      // detectDomain checks cmd.startsWith('aws ') before
-      // cmd.includes('secretsmanager'), so 'cloud' wins over 'secrets'.
+      // aws secretsmanager routes to 'secrets' domain
       const r = await safeAnalyze('aws secretsmanager get-secret-value --secret-id prod/db');
-      expect(r.domain).toBe('cloud');
-      expect(r.operation).toBeUndefined();
+      expect(r.domain).toBe('secrets');
+      expect(r.operation).toBe('read');
       expect(r.blocked).toBe(false);
       expect(r.note).toBe(ANALYSIS_NOTE);
       expect(r.policy_decision).toBe('ALLOWED');
@@ -262,28 +211,23 @@ describe('safe_analyze — all 10 domains', () => {
       expect(detectDomain('iptables -F INPUT')).toBe('network');
       const r = await safeAnalyze('iptables -F INPUT');
       expect(r.domain).toBe('network');
-      // ParsedNetworkCommand has `action` not `commandType` — undefined.
-      expect(r.operation).toBeUndefined();
-      // ParsedNetworkCommand has riskLevel (CRITICAL for -F).
+      expect(r.operation).toBe('configure');
       expect(r.riskLevel).toBeDefined();
-      // blocked: UPPERCASE vs lowercase comparison, always false.
-      expect(r.blocked).toBe(false);
+      expect(r.blocked).toBe(true);
       expect(r.note).toBe(ANALYSIS_NOTE);
-      expect(r.policy_decision).toBe('ALLOWED');
+      expect(r.policy_decision).toBe('BLOCKED');
     });
   });
 
   // ── Git ──────────────────────────────────────────────────────────────────
 
-  describe('git domain (falls to default case)', () => {
+  describe('git domain (has dedicated parser)', () => {
     test('git status', async () => {
       const r = await safeAnalyze('git status');
       expect(r.domain).toBe('git');
-      // No parser registered for 'git' — hits default branch.
-      expect(r.operation).toBe('unknown');
-      expect(r.riskLevel).toBe('unknown');
+      expect(r.operation).toBe('status');
+      expect(r.riskLevel).toBeDefined();
       expect(r.blocked).toBe(false);
-      expect(r.reason).toBe('No parser available for this domain');
       expect(r.note).toBe(ANALYSIS_NOTE);
       expect(r.policy_decision).toBe('ALLOWED');
     });
@@ -291,26 +235,24 @@ describe('safe_analyze — all 10 domains', () => {
     test('git push --force origin main', async () => {
       const r = await safeAnalyze('git push --force origin main');
       expect(r.domain).toBe('git');
-      expect(r.operation).toBe('unknown');
-      expect(r.blocked).toBe(false);
+      expect(r.operation).toBe('force-push');
+      expect(r.blocked).toBe(true);
       expect(r.note).toBe(ANALYSIS_NOTE);
-      expect(r.policy_decision).toBe('ALLOWED');
+      expect(r.policy_decision).toBe('BLOCKED');
     });
   });
 
   // ── Queue ────────────────────────────────────────────────────────────────
 
-  describe('queue domain (falls to default case)', () => {
+  describe('queue domain (has dedicated parser)', () => {
     test('redis-cli FLUSHALL', async () => {
       const r = await safeAnalyze('redis-cli FLUSHALL');
       expect(r.domain).toBe('queue');
-      // No parser for 'queue' — hits default branch.
-      expect(r.operation).toBe('unknown');
-      expect(r.riskLevel).toBe('unknown');
-      expect(r.blocked).toBe(false);
-      expect(r.reason).toBe('No parser available for this domain');
+      expect(r.operation).toBe('purge');
+      expect(r.riskLevel).toMatch(/^(HIGH|CRITICAL)$/);
+      expect(r.blocked).toBe(true);
       expect(r.note).toBe(ANALYSIS_NOTE);
-      expect(r.policy_decision).toBe('ALLOWED');
+      expect(r.policy_decision).toBe('BLOCKED');
     });
   });
 });
@@ -321,18 +263,15 @@ describe('safe_analyze — all 10 domains', () => {
 
 describe('safe_policy_check — DENY / ALLOW / edge cases', () => {
   describe('allowed (safe) commands', () => {
-    test('SELECT * FROM users — allowed, risk undefined (SafeIntent has no riskLevel)', async () => {
+    test('SELECT * FROM users — allowed, risk is defined', async () => {
       const r = await safePolicyCheck('SELECT * FROM users');
       expect(r.allowed).toBe(true);
       expect(r.domain).toBe('sql');
-      // SafeIntent lacks riskLevel — tools.ts reads intent.riskLevel = undefined.
-      expect(r.risk).toBeUndefined();
+      expect(r.risk).toBeDefined();
     });
 
     test('find /tmp -name test — allowed', async () => {
       const r = await safePolicyCheck('find /tmp -name test');
-      // FilesystemIntent has isDenied (not denied). intent.denied = undefined.
-      // So blocked = undefined, and !undefined = true, thus allowed = true.
       expect(r.allowed).toBe(true);
       expect(r.domain).toBe('filesystem');
       expect(r.risk).toBeDefined();
@@ -345,36 +284,25 @@ describe('safe_policy_check — DENY / ALLOW / edge cases', () => {
     });
   });
 
-  describe('commands that should be dangerous but are allowed due to field mismatch', () => {
-    test('rm -rf / — allowed=true because intent.denied is undefined (isDenied mismatch)', async () => {
-      // This is a known bug: tools.ts reads `intent.denied` but
-      // FilesystemIntent has `isDenied`. So blocked = undefined,
-      // and !undefined = true, meaning allowed = true.
+  describe('dangerous commands are properly blocked', () => {
+    test('rm -rf / — allowed=false (blocked=true)', async () => {
       const r = await safePolicyCheck('rm -rf /');
-      expect(r.allowed).toBe(true);
+      expect(r.allowed).toBe(false);
       expect(r.domain).toBe('filesystem');
-      // reason: blocked is falsy, so safePolicyCheck uses the fallback path.
-      // However, result.reason comes from `intent.denyReason ?? null`, and
-      // denyReason IS set on the FilesystemIntent. So reason is populated
-      // even though blocked is undefined. The safePolicyCheck then uses
-      // `result.reason ?? (result.blocked ? ... : ...)` — since result.reason
-      // is truthy, the nullish coalescing stops there.
-      expect(r.reason).toMatch(/rm -rf/);
+      expect(r.reason).toBeTruthy();
     });
 
-    test('dd if=/dev/zero of=/dev/sda — allowed=true due to same mismatch', async () => {
+    test('dd if=/dev/zero of=/dev/sda — allowed=false (blocked=true)', async () => {
       const r = await safePolicyCheck('dd if=/dev/zero of=/dev/sda');
-      expect(r.allowed).toBe(true);
+      expect(r.allowed).toBe(false);
       expect(r.domain).toBe('filesystem');
     });
 
-    test('iptables -F INPUT — allowed=true due to UPPERCASE vs lowercase riskLevel mismatch', async () => {
+    test('iptables -F INPUT — allowed=false (CRITICAL risk, properly blocked)', async () => {
       const r = await safePolicyCheck('iptables -F INPUT');
       expect(r.domain).toBe('network');
-      // riskLevel exists and is CRITICAL (uppercase), but comparison is
-      // against lowercase 'critical', so blocked = false.
       expect(r.risk).toBeDefined();
-      expect(r.allowed).toBe(true);
+      expect(r.allowed).toBe(false);
     });
   });
 
@@ -418,9 +346,9 @@ describe('safe_execute — return structure', () => {
     expect(typeof r.operation).toBe('string');
   });
 
-  test('operation is undefined for domains with field mismatch (SQL)', async () => {
+  test('operation is defined for SQL (returns SELECT)', async () => {
     const r = await safeExecute('SELECT * FROM users');
-    expect(r.operation).toBeUndefined();
+    expect(r.operation).toBe('SELECT');
   });
 
   test('targets is an array', async () => {
@@ -428,14 +356,13 @@ describe('safe_execute — return structure', () => {
     expect(Array.isArray(r.targets)).toBe(true);
   });
 
-  test('blocked can be boolean or undefined depending on domain', async () => {
-    // For default-case domains (git, queue), blocked is boolean (false).
+  test('blocked is always boolean across all domains', async () => {
     const git = await safeExecute('git status');
     expect(typeof git.blocked).toBe('boolean');
 
-    // For filesystem, blocked = intent.denied which is undefined.
+    // For filesystem, blocked is now a proper boolean
     const fs = await safeExecute('find /tmp -name test');
-    expect(fs.blocked).toBeUndefined();
+    expect(typeof fs.blocked).toBe('boolean');
   });
 
   test('reason is string or null', async () => {
@@ -448,13 +375,10 @@ describe('safe_execute — return structure', () => {
     expectValidPolicyDecision(r.policy_decision);
   });
 
-  test('filesystem blocked field is undefined, policy_decision uses falsy check', async () => {
-    // blocked = undefined (intent.denied is undefined).
-    // policy_decision = undefined ? 'BLOCKED' : 'ALLOWED' = 'ALLOWED'
-    // because undefined is falsy.
+  test('filesystem blocked=true for rm -rf /, policy_decision=BLOCKED', async () => {
     const r = await safeExecute('rm -rf /');
-    expect(r.blocked).toBeUndefined();
-    expect(r.policy_decision).toBe('ALLOWED');
+    expect(r.blocked).toBe(true);
+    expect(r.policy_decision).toBe('BLOCKED');
   });
 
   test('default-case domain has blocked=false, policy_decision=ALLOWED', async () => {
@@ -463,10 +387,10 @@ describe('safe_execute — return structure', () => {
     expect(r.policy_decision).toBe('ALLOWED');
   });
 
-  test('SQL domain has blocked=false due to missing riskLevel', async () => {
+  test('SQL domain has blocked=true for destructive DELETE', async () => {
     const r = await safeExecute('DELETE FROM users');
-    expect(r.blocked).toBe(false);
-    expect(r.policy_decision).toBe('ALLOWED');
+    expect(r.blocked).toBe(true);
+    expect(r.policy_decision).toBe('BLOCKED');
   });
 });
 
@@ -499,6 +423,7 @@ describe('domain override', () => {
     const r = await safeExecute('SELECT 1', 'nonexistent');
     expect(r.domain).toBe('nonexistent');
     expect(r.operation).toBe('unknown');
+    // default case returns 'unknown' as RiskLevel
     expect(r.riskLevel).toBe('unknown');
     expect(r.blocked).toBe(false);
     expect(r.reason).toBe('No parser available for this domain');

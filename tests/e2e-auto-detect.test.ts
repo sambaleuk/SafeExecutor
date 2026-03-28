@@ -345,12 +345,12 @@ describe('Secrets domain — full chain', () => {
     expect(parsed.action).toBe('export');
   });
 
-  test('aws secretsmanager get-secret-value --secret-id prod/db → cloud domain (aws prefix takes priority)', () => {
+  test('aws secretsmanager get-secret-value --secret-id prod/db → secrets domain', () => {
     const cmd = 'aws secretsmanager get-secret-value --secret-id prod/db';
 
-    // detectDomain matches 'aws ' prefix first, routing to 'cloud' before
-    // the 'secretsmanager' substring check. This documents the priority order.
-    expect(detectDomain(cmd)).toBe('cloud');
+    // detectDomain checks 'secretsmanager' keyword before generic 'aws ' prefix,
+    // routing to 'secrets'.
+    expect(detectDomain(cmd)).toBe('secrets');
 
     // The secrets parser handles it correctly when invoked directly
     const parsed = parseSecretCommand(cmd);

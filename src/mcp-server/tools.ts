@@ -4,6 +4,16 @@
  */
 
 import { detectDomain } from './auto-detect.js';
+import type { RiskLevel, RiskFactor } from '../types/index.js';
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function maxRisk(factors: RiskFactor[]): RiskLevel {
+  const order: RiskLevel[] = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
+  return factors.reduce<RiskLevel>((max, f) => {
+    return order.indexOf(f.severity) > order.indexOf(max) ? f.severity : max;
+  }, 'LOW');
+}
 
 // ─── Lazy parser imports ─────────────────────────────────────────────────────
 
@@ -12,13 +22,14 @@ async function parseWithDomain(command: string, domain: string) {
     case 'sql': {
       const { parseIntent } = await import('../adapters/sql/parser.js');
       const intent = await parseIntent(command);
+      const riskLevel = maxRisk(intent.riskFactors);
       return {
         domain,
-        operation: intent.operationType,
-        targets: intent.targets?.map((t) => t.name) ?? [],
-        riskLevel: intent.riskLevel,
-        blocked: intent.riskLevel === 'critical' || intent.riskLevel === 'high',
-        reason: intent.riskFactors?.map((r) => r.description).join('; ') ?? null,
+        operation: intent.type,
+        targets: intent.tables,
+        riskLevel,
+        blocked: riskLevel === 'CRITICAL' || riskLevel === 'HIGH',
+        reason: intent.riskFactors.map((r) => r.description).join('; ') || null,
       };
     }
     case 'filesystem': {
@@ -27,9 +38,9 @@ async function parseWithDomain(command: string, domain: string) {
       return {
         domain,
         operation: intent.commandType,
-        targets: intent.targets?.map((t) => t.path) ?? [],
+        targets: intent.targetPaths,
         riskLevel: intent.riskLevel,
-        blocked: intent.denied,
+        blocked: intent.isDenied || intent.riskLevel === 'CRITICAL' || intent.riskLevel === 'HIGH',
         reason: intent.denyReason ?? null,
       };
     }
@@ -38,24 +49,23 @@ async function parseWithDomain(command: string, domain: string) {
       const intent = buildCloudIntent(command);
       return {
         domain,
-        operation: intent.operationType,
-        targets: intent.targets?.map((t) => t.name) ?? [],
+        operation: intent.actionType,
+        targets: intent.command.resources,
         riskLevel: intent.riskLevel,
-        blocked: intent.riskLevel === 'critical' || intent.riskLevel === 'high',
-        reason: intent.riskFactors?.map((r: { description: string }) => r.description).join('; ') ?? null,
+        blocked: intent.riskLevel === 'CRITICAL' || intent.riskLevel === 'HIGH',
+        reason: intent.isDestructive ? 'Destructive cloud operation' : null,
       };
     }
     case 'kubernetes': {
-      const { parseKubeCommand, toSafeIntent } = await import('../adapters/kubernetes/parser.js');
+      const { parseKubeCommand } = await import('../adapters/kubernetes/parser.js');
       const kube = parseKubeCommand(command);
-      const intent = toSafeIntent(kube);
       return {
         domain,
-        operation: intent.operationType,
-        targets: intent.targets?.map((t) => t.name) ?? [],
-        riskLevel: intent.riskLevel,
-        blocked: intent.riskLevel === 'critical' || intent.riskLevel === 'high',
-        reason: intent.riskFactors?.map((r) => r.description).join('; ') ?? null,
+        operation: kube.verb,
+        targets: [kube.resourceType, kube.resourceName].filter((v): v is string => v !== undefined),
+        riskLevel: kube.riskLevel,
+        blocked: kube.riskLevel === 'CRITICAL' || kube.riskLevel === 'HIGH',
+        reason: kube.dangerousPatterns.join('; ') || null,
       };
     }
     case 'cicd': {
@@ -63,11 +73,11 @@ async function parseWithDomain(command: string, domain: string) {
       const intent = parseCicdCommand(command);
       return {
         domain,
-        operation: intent.operation,
-        targets: intent.targets ?? [],
+        operation: intent.action,
+        targets: intent.imageTag ? [intent.imageTag] : [],
         riskLevel: intent.riskLevel,
-        blocked: intent.riskLevel === 'critical' || intent.riskLevel === 'high',
-        reason: intent.riskFactors?.join('; ') ?? null,
+        blocked: intent.riskLevel === 'CRITICAL' || intent.riskLevel === 'HIGH',
+        reason: intent.dangerousPatterns.map((p) => p.description).join('; ') || null,
       };
     }
     case 'api': {
@@ -76,10 +86,10 @@ async function parseWithDomain(command: string, domain: string) {
       return {
         domain,
         operation: intent.method,
-        targets: [intent.url ?? command],
+        targets: [`${intent.host}${intent.path}`],
         riskLevel: intent.riskLevel,
-        blocked: intent.riskLevel === 'critical' || intent.riskLevel === 'high',
-        reason: intent.riskFactors?.map((r: { description: string }) => r.description).join('; ') ?? null,
+        blocked: intent.riskLevel === 'CRITICAL' || intent.riskLevel === 'HIGH',
+        reason: intent.sensitiveFields.length > 0 ? intent.sensitiveFields.map((f) => f.field).join(', ') : null,
       };
     }
     case 'secrets': {
@@ -87,11 +97,11 @@ async function parseWithDomain(command: string, domain: string) {
       const intent = parseSecretCommand(command);
       return {
         domain,
-        operation: intent.operation,
-        targets: intent.secretPaths ?? [],
+        operation: intent.action,
+        targets: intent.secretPath ? [intent.secretPath] : [],
         riskLevel: intent.riskLevel,
-        blocked: intent.riskLevel === 'critical' || intent.riskLevel === 'high',
-        reason: intent.riskFactors?.join('; ') ?? null,
+        blocked: intent.riskLevel === 'CRITICAL' || intent.riskLevel === 'HIGH',
+        reason: intent.dangerousPatterns.map((p) => p.description).join('; ') || null,
       };
     }
     case 'network': {
@@ -99,21 +109,45 @@ async function parseWithDomain(command: string, domain: string) {
       const intent = parseNetworkCommand(command);
       return {
         domain,
-        operation: intent.commandType,
-        targets: intent.targets ?? [],
+        operation: intent.action,
+        targets: intent.targetHost ? [intent.targetHost] : [],
         riskLevel: intent.riskLevel,
-        blocked: intent.riskLevel === 'critical' || intent.riskLevel === 'high',
-        reason: intent.riskFactors?.join('; ') ?? null,
+        blocked: intent.riskLevel === 'CRITICAL' || intent.riskLevel === 'HIGH',
+        reason: intent.dangerousPatterns.map((p) => p.description).join('; ') || null,
+      };
+    }
+    case 'git': {
+      const { parseGitCommand } = await import('../adapters/git/parser.js');
+      const intent = parseGitCommand(command);
+      return {
+        domain,
+        operation: intent.action,
+        targets: intent.refs,
+        riskLevel: intent.riskLevel,
+        blocked: intent.riskLevel === 'CRITICAL' || intent.riskLevel === 'HIGH',
+        reason: intent.isDestructive ? 'Destructive git operation' : null,
+      };
+    }
+    case 'queue': {
+      const { parseQueueCommand } = await import('../adapters/queue/parser.js');
+      const intent = parseQueueCommand(command);
+      return {
+        domain,
+        operation: intent.action,
+        targets: intent.targetName ? [intent.targetName] : [],
+        riskLevel: intent.riskLevel,
+        blocked: intent.riskLevel === 'CRITICAL' || intent.riskLevel === 'HIGH',
+        reason: intent.dangerousPatterns.map((p) => p.description).join('; ') || null,
       };
     }
     default:
       return {
         domain,
-        operation: 'unknown',
-        targets: [],
-        riskLevel: 'unknown',
+        operation: 'unknown' as const,
+        targets: [] as string[],
+        riskLevel: 'unknown' as RiskLevel,
         blocked: false,
-        reason: 'No parser available for this domain',
+        reason: 'No parser available for this domain' as string | null,
       };
   }
 }

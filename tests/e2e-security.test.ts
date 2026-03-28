@@ -854,13 +854,10 @@ describe('Cross-Domain Injection Patterns', () => {
   });
 
   test('detectDomain correctly routes ambiguous commands', () => {
-    // aws commands: detectDomain checks `aws ` prefix first, routing to 'cloud'.
-    // However, `secretsmanager` keyword is checked via `.includes('secretsmanager')`,
-    // but the `aws ` prefix match for 'cloud' comes first in the detection order.
+    // aws ec2 commands route to 'cloud'
     expect(detectDomain('aws ec2 describe-instances')).toBe('cloud');
-    // Note: `aws secretsmanager` routes to 'cloud' because `aws ` prefix check
-    // precedes the `secretsmanager` keyword check in detectDomain.
-    expect(detectDomain('aws secretsmanager get-secret-value --secret-id test')).toBe('cloud');
+    // aws secretsmanager routes to 'secrets' (secretsmanager keyword takes priority)
+    expect(detectDomain('aws secretsmanager get-secret-value --secret-id test')).toBe('secrets');
 
     // kubectl goes to kubernetes, not secrets (even with secret subresource)
     expect(detectDomain('kubectl get secret my-secret -o yaml')).toBe('kubernetes');
