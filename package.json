@@ -19,17 +19,7 @@
     "lint": "eslint src --ext .ts",
     "clean": "rm -rf dist"
   },
-  "keywords": [
-    "database",
-    "safety",
-    "harness",
-    "postgres",
-    "sql",
-    "audit",
-    "approval",
-    "dry-run",
-    "production"
-  ],
+  "keywords": ["database","safety","harness","postgres","sql","audit","approval","dry-run","production"],
   "author": "sambaleuk",
   "license": "MIT",
   "repository": {
@@ -39,6 +29,7 @@
   "dependencies": {
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1",
+    "node-sql-parser": "^4.18.0",
     "pg": "^8.13.1"
   },
   "devDependencies": {
