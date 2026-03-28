@@ -1,413 +1,283 @@
-import type { ParsedSecretCommand, SecretAction, SecretEnvironment, SecretTool } from './types.js';
+import type {
+  ParsedSecretCommand,
+  SecretTool,
+  SecretAction,
+  SecretScope,
+  DangerousPattern,
+} from './types.js';
+import type { RiskLevel } from '../../types/index.js';
 
-/**
- * Secret Command Parser
- *
- * Parses raw secret management commands into a structured ParsedSecretCommand.
- * Supports: vault, aws secretsmanager, aws ssm, gcloud secrets,
- *           az keyvault, kubectl secret, docker secret, export/.env
- */
+const RISK_ORDER: RiskLevel[] = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
 
-// ─── Environment Detection ────────────────────────────────────────────────────
+function escalateRisk(a: RiskLevel, b: RiskLevel): RiskLevel {
+  return RISK_ORDER.indexOf(a) >= RISK_ORDER.indexOf(b) ? a : b;
+}
 
-const PROD_RE = /\b(prod|production|prd)\b/i;
-const STAGING_RE = /\b(stag|staging|stg)\b/i;
-const DEV_RE = /\b(dev|development|local|test|sandbox)\b/i;
+// ─── Tool detection ─────────────────────────────────────────────────────────
 
-function detectEnvironment(text: string): SecretEnvironment {
-  if (PROD_RE.test(text)) return 'production';
-  if (STAGING_RE.test(text)) return 'staging';
-  if (DEV_RE.test(text)) return 'development';
+function detectTool(command: string): SecretTool {
+  const cmd = command.trim();
+  if (/^vault\s/.test(cmd)) return 'vault';
+  if (/^aws\s+secretsmanager\b/.test(cmd)) return 'aws-secrets';
+  if (/^aws\s+ssm\b/.test(cmd)) return 'aws-ssm';
+  if (/^gcloud\s+secrets?\b/.test(cmd)) return 'gcloud-secrets';
+  if (/^az\s+keyvault\b/.test(cmd)) return 'az-keyvault';
+  if (/^kubectl\s.*\bsecret/.test(cmd)) return 'kubectl-secrets';
+  if (/^docker\s+secret\b/.test(cmd)) return 'docker-secrets';
+  if (/^export\s+\w+=/.test(cmd) || /^printenv\b/.test(cmd) || /^env\b/.test(cmd)) {
+    return 'env-export';
+  }
   return 'unknown';
 }
 
-function isWildcardPath(path: string): boolean {
-  return path === '' || path === '/' || path.endsWith('/') || path.includes('*');
+// ─── Action detection ───────────────────────────────────────────────────────
+
+function detectAction(command: string, tool: SecretTool): SecretAction {
+  const cmd = command.toLowerCase();
+
+  switch (tool) {
+    case 'vault':
+      if (/\bread\b/.test(cmd) || /\bget\b/.test(cmd)) return 'read';
+      if (/\bwrite\b/.test(cmd) || /\bput\b/.test(cmd)) return 'write';
+      if (/\bdelete\b/.test(cmd) || /\bdestroy\b/.test(cmd)) return 'delete';
+      if (/\blist\b/.test(cmd)) return 'list';
+      return 'read';
+
+    case 'aws-secrets':
+      if (/get-secret-value/.test(cmd)) return 'read';
+      if (/create-secret/.test(cmd)) return 'create';
+      if (/put-secret-value/.test(cmd) || /update-secret/.test(cmd)) return 'write';
+      if (/delete-secret/.test(cmd)) return 'delete';
+      if (/list-secrets/.test(cmd)) return 'list';
+      if (/rotate-secret/.test(cmd)) return 'rotate';
+      return 'read';
+
+    case 'aws-ssm':
+      if (/get-parameter/.test(cmd)) return 'read';
+      if (/put-parameter/.test(cmd)) return 'write';
+      if (/delete-parameter/.test(cmd)) return 'delete';
+      if (/get-parameters-by-path/.test(cmd) || /describe-parameters/.test(cmd)) return 'list';
+      return 'read';
+
+    case 'gcloud-secrets':
+      if (/\bversions\s+access\b/.test(cmd) || /\baccess\b/.test(cmd)) return 'read';
+      if (/\bcreate\b/.test(cmd)) return 'create';
+      if (/\bversions\s+add\b/.test(cmd) || /\bset\b/.test(cmd)) return 'write';
+      if (/\bdelete\b/.test(cmd)) return 'delete';
+      if (/\blist\b/.test(cmd)) return 'list';
+      return 'read';
+
+    case 'az-keyvault':
+      if (/secret\s+show\b/.test(cmd) || /secret\s+download\b/.test(cmd)) return 'read';
+      if (/secret\s+set\b/.test(cmd)) return 'write';
+      if (/secret\s+delete\b/.test(cmd) || /secret\s+purge\b/.test(cmd)) return 'delete';
+      if (/secret\s+list\b/.test(cmd)) return 'list';
+      if (/secret\s+set-attributes\b/.test(cmd)) return 'write';
+      return 'read';
+
+    case 'kubectl-secrets':
+      if (/\bget\b/.test(cmd)) return 'read';
+      if (/\bcreate\b/.test(cmd) || /\bapply\b/.test(cmd)) return 'create';
+      if (/\bdelete\b/.test(cmd)) return 'delete';
+      if (/\bedit\b/.test(cmd) || /\bpatch\b/.test(cmd)) return 'write';
+      return 'read';
+
+    case 'docker-secrets':
+      if (/secret\s+inspect\b/.test(cmd)) return 'read';
+      if (/secret\s+create\b/.test(cmd)) return 'create';
+      if (/secret\s+rm\b/.test(cmd)) return 'delete';
+      if (/secret\s+ls\b/.test(cmd)) return 'list';
+      return 'read';
+
+    case 'env-export':
+      if (/^export\s/.test(cmd)) return 'export';
+      return 'read';
+
+    default:
+      return 'unknown';
+  }
 }
 
-// ─── Inline Secret Detection ──────────────────────────────────────────────────
+// ─── Scope detection ────────────────────────────────────────────────────────
 
-function detectInlinePlaintext(command: string): boolean {
-  // vault kv put secret/path key=value  (value= pattern implies a value assignment)
-  if (/\bvalue\s*=\s*\S+/i.test(command)) return true;
-  // --secret-string, --value, --password flags with actual values (not file references)
-  if (/--(?:secret-string|value|password|token)\s+(?!@)\S+/i.test(command)) return true;
-  // --from-literal=key=actualvalue (kubectl)
-  if (/--from-literal\s*=\s*\w+=\S+/.test(command)) return true;
-  // export VAR=actualvalue (non-empty value)
-  if (/^export\s+\w+=\S+/i.test(command.trim())) return true;
-  return false;
+function detectScope(command: string, tool: SecretTool, action: SecretAction): SecretScope {
+  if (action === 'list') return 'namespace';
+  if (/--recursive/.test(command) || /by-path/.test(command)) return 'namespace';
+
+  // Wildcard paths indicate namespace scope
+  if (/[/*]$/.test(command) || /\*/.test(command)) return 'namespace';
+
+  // Global destructive operations
+  if (tool === 'vault' && action === 'delete' && /\bmetadata\b/.test(command)) return 'global';
+
+  return 'single';
 }
 
-function detectRawOutput(command: string): boolean {
-  if (/-o\s+(?:yaml|json)\b/i.test(command)) return true;
-  if (/--output\s+(?:yaml|json)\b/i.test(command)) return true;
-  // aws secretsmanager --query SecretString exposes the secret value
-  if (/--query\s+SecretString/i.test(command)) return true;
-  if (/-format\s*=\s*(?:json|yaml)/i.test(command)) return true;
-  return false;
-}
+// ─── Secret path extraction ─────────────────────────────────────────────────
 
-// ─── Flag Extraction ──────────────────────────────────────────────────────────
-
-function extractFlag(parts: string[], flag: string): string | undefined {
-  for (let i = 0; i < parts.length; i++) {
-    const p = parts[i]!;
-    if (p === `--${flag}` && i + 1 < parts.length) return parts[i + 1];
-    const eqMatch = p.match(new RegExp(`^--${flag}=(.+)$`));
-    if (eqMatch?.[1]) return eqMatch[1];
+function extractSecretPath(command: string, tool: SecretTool): string | undefined {
+  // Vault: vault read secret/data/myapp/db-password
+  if (tool === 'vault') {
+    const m = command.match(/(?:read|write|delete|list|get|put|destroy)\s+([\w/.-]+)/);
+    return m?.[1];
+  }
+  // AWS: --secret-id <name> or --name <name>
+  if (tool === 'aws-secrets' || tool === 'aws-ssm') {
+    const m = command.match(/--(?:secret-id|name|path)\s+["']?([^\s"']+)/);
+    return m?.[1];
+  }
+  // GCloud: gcloud secrets versions access latest --secret=<name>
+  if (tool === 'gcloud-secrets') {
+    const m = command.match(/--secret[=\s]+["']?([^\s"']+)/) ??
+              command.match(/secrets?\s+\w+\s+([\w/.-]+)/);
+    return m?.[1];
+  }
+  // AZ: --name <name> --vault-name <vault>
+  if (tool === 'az-keyvault') {
+    const m = command.match(/--name\s+["']?([^\s"']+)/);
+    return m?.[1];
+  }
+  // Kubectl: kubectl get secret <name>
+  if (tool === 'kubectl-secrets') {
+    const m = command.match(/secret\s+(?:get|create|delete|edit|patch|apply)\s+(?:-[fnol]\s+\S+\s+)*(\S+)/);
+    return m?.[1];
   }
   return undefined;
 }
 
-// ─── Internal partial type ────────────────────────────────────────────────────
+// ─── Namespace extraction ───────────────────────────────────────────────────
 
-interface PartialParsed {
-  action: SecretAction;
-  secretPath: string;
-  version?: string;
+function extractNamespace(command: string): string | undefined {
+  const m = command.match(/-n\s+["']?([^\s"']+)/) ??
+            command.match(/--namespace[=\s]+["']?([^\s"']+)/) ??
+            command.match(/--vault-name[=\s]+["']?([^\s"']+)/);
+  return m?.[1];
 }
 
-// ─── Vault ────────────────────────────────────────────────────────────────────
+// ─── Production detection ───────────────────────────────────────────────────
 
-function parseVault(parts: string[]): PartialParsed {
-  const sub = parts[1] ?? '';
+function isProductionContext(command: string, secretPath?: string): boolean {
+  const combined = `${command} ${secretPath ?? ''}`.toLowerCase();
+  return /\bprod(?:uction)?\b/.test(combined) ||
+         /--vault-name\s+\S*prod/i.test(command) ||
+         /\brelease\b/.test(combined);
+}
 
-  if (sub === 'kv') {
-    const kvOp = parts[2] ?? '';
-    let action: SecretAction;
-    switch (kvOp) {
-      case 'get':      action = 'read';   break;
-      case 'put':      action = 'write';  break;
-      case 'patch':    action = 'write';  break;
-      case 'delete':   action = 'delete'; break;
-      case 'list':     action = 'list';   break;
-      case 'undelete': action = 'write';  break;
-      default:         action = 'read';   break;
+// ─── Dangerous patterns ─────────────────────────────────────────────────────
+
+const DANGEROUS_PATTERNS: Array<{ regex: RegExp; pattern: string; description: string; severity: DangerousPattern['severity'] }> = [
+  { regex: /--force-delete-without-recovery/, pattern: '--force-delete-without-recovery', description: 'Permanently deletes secret without recovery window', severity: 'DENY' },
+  { regex: /\bpurge\b/, pattern: 'purge', description: 'Permanently purges deleted secret — unrecoverable', severity: 'DENY' },
+  { regex: /secret\s+delete\s+--id\s+\*/, pattern: 'wildcard-delete', description: 'Wildcard secret deletion — mass data loss', severity: 'DENY' },
+  { regex: /\bdestroy\b.*\bversions=all\b/, pattern: 'destroy-all-versions', description: 'Destroys all versions of a secret — unrecoverable', severity: 'DENY' },
+  { regex: /--output\s+(?:text|table).*get-secret-value/, pattern: 'plaintext-output', description: 'Secret value printed in plaintext to stdout', severity: 'HIGH' },
+  { regex: /get-secret-value.*--output\s+(?:text|table)/, pattern: 'plaintext-output', description: 'Secret value printed in plaintext to stdout', severity: 'HIGH' },
+  { regex: /-o\s+(?:yaml|json|jsonpath).*secret/, pattern: 'k8s-secret-decode', description: 'Kubernetes secret decoded to stdout', severity: 'HIGH' },
+  { regex: /\|\s*(?:base64|jq|grep|awk)/, pattern: 'pipe-secret', description: 'Secret value piped to another command — risk of logging', severity: 'HIGH' },
+  { regex: />\s*\S+/, pattern: 'redirect-to-file', description: 'Secret value redirected to file — may persist on disk', severity: 'HIGH' },
+  { regex: /--force/, pattern: '--force', description: 'Force flag bypasses safety confirmations', severity: 'HIGH' },
+];
+
+function detectDangerousPatterns(command: string): DangerousPattern[] {
+  const results: DangerousPattern[] = [];
+  for (const dp of DANGEROUS_PATTERNS) {
+    if (dp.regex.test(command)) {
+      results.push({ pattern: dp.pattern, description: dp.description, severity: dp.severity });
     }
-
-    let secretPath = '';
-    let version: string | undefined;
-
-    for (let i = 3; i < parts.length; i++) {
-      const p = parts[i]!;
-      const versionMatch = p.match(/^-?-versions?=(.+)$/);
-      if (versionMatch?.[1]) { version = versionMatch[1]; continue; }
-      if (p.startsWith('-')) continue;
-      // For write, stop at first non-flag token that has no '=' (the path)
-      if (!p.includes('=') || action === 'read') { secretPath = p; break; }
-    }
-
-    return { action, secretPath, version };
   }
-
-  // vault read / write / delete / list / unwrap
-  let action: SecretAction;
-  switch (sub) {
-    case 'read':   action = 'read';   break;
-    case 'write':  action = 'write';  break;
-    case 'delete': action = 'delete'; break;
-    case 'list':   action = 'list';   break;
-    case 'unwrap': action = 'read';   break;
-    default:       action = 'read';   break;
-  }
-
-  let secretPath = '';
-  for (let i = 2; i < parts.length; i++) {
-    const p = parts[i]!;
-    if (p.startsWith('-')) continue;
-    if (!p.includes('=')) { secretPath = p; break; }
-  }
-
-  return { action, secretPath };
+  return results;
 }
 
-// ─── AWS Secrets Manager ──────────────────────────────────────────────────────
+// ─── Flag extraction ────────────────────────────────────────────────────────
 
-function parseAwsSecrets(parts: string[]): PartialParsed {
-  // aws secretsmanager <subcommand> [flags]
-  const subCmd = parts[2] ?? '';
-  let action: SecretAction;
-  switch (subCmd) {
-    case 'get-secret-value':   action = 'read';   break;
-    case 'describe-secret':    action = 'read';   break;
-    case 'create-secret':      action = 'write';  break;
-    case 'update-secret':      action = 'write';  break;
-    case 'put-secret-value':   action = 'write';  break;
-    case 'delete-secret':      action = 'delete'; break;
-    case 'list-secrets':       action = 'list';   break;
-    case 'rotate-secret':      action = 'rotate'; break;
-    case 'restore-secret':     action = 'write';  break;
-    default:                   action = 'read';   break;
-  }
-
-  const secretPath =
-    extractFlag(parts, 'secret-id') ??
-    extractFlag(parts, 'name') ??
-    '';
-
-  const version =
-    extractFlag(parts, 'version-id') ??
-    extractFlag(parts, 'version-stage');
-
-  return { action, secretPath, version };
+function extractFlags(command: string): string[] {
+  const matches = command.match(/--?[\w-]+/g) ?? [];
+  return [...new Set(matches)];
 }
 
-// ─── AWS SSM Parameter Store ──────────────────────────────────────────────────
+// ─── Risk classification ────────────────────────────────────────────────────
 
-function parseAwsSsm(parts: string[]): PartialParsed {
-  // aws ssm <subcommand> [flags]
-  const subCmd = parts[2] ?? '';
-  let action: SecretAction;
-  switch (subCmd) {
-    case 'get-parameter':          action = 'read';   break;
-    case 'get-parameters':         action = 'read';   break;
-    case 'get-parameters-by-path': action = 'list';   break;
-    case 'put-parameter':          action = 'write';  break;
-    case 'delete-parameter':       action = 'delete'; break;
-    case 'delete-parameters':      action = 'delete'; break;
-    case 'describe-parameters':    action = 'list';   break;
-    default:                       action = 'read';   break;
+function classifyRisk(
+  action: SecretAction,
+  scope: SecretScope,
+  isProduction: boolean,
+  dangerousPatterns: DangerousPattern[],
+): RiskLevel {
+  let risk: RiskLevel = 'LOW';
+
+  // Action-based risk
+  if (action === 'read' || action === 'list') risk = 'LOW';
+  else if (action === 'export') risk = 'MEDIUM';
+  else if (action === 'create' || action === 'write') risk = 'MEDIUM';
+  else if (action === 'rotate') risk = 'HIGH';
+  else if (action === 'delete') risk = 'HIGH';
+
+  // Scope escalation
+  if (scope === 'namespace') risk = escalateRisk(risk, 'MEDIUM');
+  if (scope === 'global') risk = escalateRisk(risk, 'HIGH');
+
+  // Production escalation
+  if (isProduction && (action !== 'read' && action !== 'list')) {
+    risk = escalateRisk(risk, 'HIGH');
   }
 
-  const secretPath =
-    extractFlag(parts, 'name') ??
-    extractFlag(parts, 'path') ??
-    '';
+  // Dangerous patterns escalation
+  for (const dp of dangerousPatterns) {
+    if (dp.severity === 'DENY' || dp.severity === 'CRITICAL') risk = escalateRisk(risk, 'CRITICAL');
+    else if (dp.severity === 'HIGH') risk = escalateRisk(risk, 'HIGH');
+  }
 
-  return { action, secretPath };
+  return risk;
 }
 
-// ─── GCP Secret Manager ───────────────────────────────────────────────────────
-
-function parseGcloudSecrets(parts: string[]): PartialParsed {
-  // gcloud secrets <subcommand> [name] [flags]
-  // gcloud secrets versions <subcommand> [version] --secret=<name>
-  const sub = parts[2] ?? '';
-
-  if (sub === 'versions') {
-    const vSub = parts[3] ?? '';
-    let action: SecretAction;
-    switch (vSub) {
-      case 'access':  action = 'read';   break;
-      case 'add':     action = 'write';  break;
-      case 'destroy': action = 'delete'; break;
-      case 'disable': action = 'write';  break;
-      case 'enable':  action = 'write';  break;
-      case 'list':    action = 'list';   break;
-      default:        action = 'read';   break;
-    }
-    const version = parts[4] && !parts[4].startsWith('-') ? parts[4] : undefined;
-    const secretPath = extractFlag(parts, 'secret') ?? '';
-    return { action, secretPath, version };
-  }
-
-  let action: SecretAction;
-  switch (sub) {
-    case 'create':   action = 'write';  break;
-    case 'delete':   action = 'delete'; break;
-    case 'update':   action = 'write';  break;
-    case 'list':     action = 'list';   break;
-    case 'describe': action = 'read';   break;
-    default:         action = 'read';   break;
-  }
-
-  const nameArg = parts[3] && !parts[3].startsWith('-') ? parts[3] : undefined;
-  const secretPath = nameArg ?? extractFlag(parts, 'secret') ?? '';
-
-  return { action, secretPath };
-}
-
-// ─── Azure Key Vault ──────────────────────────────────────────────────────────
-
-function parseAzureKeyVault(parts: string[]): PartialParsed {
-  // az keyvault secret <subcommand> [flags]
-  const sub = parts[3] ?? '';
-  let action: SecretAction;
-  switch (sub) {
-    case 'show':          action = 'read';   break;
-    case 'download':      action = 'read';   break;
-    case 'list':          action = 'list';   break;
-    case 'list-versions': action = 'list';   break;
-    case 'set':           action = 'write';  break;
-    case 'delete':        action = 'delete'; break;
-    case 'recover':       action = 'write';  break;
-    case 'purge':         action = 'delete'; break;
-    case 'restore':       action = 'write';  break;
-    default:              action = 'read';   break;
-  }
-
-  const secretPath = extractFlag(parts, 'name') ?? '';
-  return { action, secretPath };
-}
-
-// ─── Kubernetes Secrets ───────────────────────────────────────────────────────
-
-function parseKubernetes(parts: string[]): PartialParsed {
-  // kubectl <verb> secret[s] [name] [flags]
-  const verb = parts[1] ?? '';
-  let action: SecretAction;
-  switch (verb) {
-    case 'get':      action = 'read';   break;
-    case 'describe': action = 'read';   break;
-    case 'create':   action = 'write';  break;
-    case 'apply':    action = 'write';  break;
-    case 'delete':   action = 'delete'; break;
-    case 'patch':    action = 'write';  break;
-    default:         action = 'read';   break;
-  }
-
-  // Extract secret name — skip verb, "secret"/"secrets", and subtype keywords
-  const SKIP_TOKENS = new Set(['secret', 'secrets', 'generic', 'docker-registry', 'tls']);
-  let secretPath = '';
-  for (let i = 2; i < parts.length; i++) {
-    const p = parts[i]!;
-    if (p.startsWith('-')) continue;
-    if (SKIP_TOKENS.has(p)) continue;
-    secretPath = p;
-    break;
-  }
-
-  return { action, secretPath };
-}
-
-// ─── Docker Secrets ───────────────────────────────────────────────────────────
-
-function parseDocker(parts: string[]): PartialParsed {
-  // docker secret <subcommand> [name]
-  const sub = parts[2] ?? '';
-  let action: SecretAction;
-  switch (sub) {
-    case 'create':  action = 'write';  break;
-    case 'rm':      action = 'delete'; break;
-    case 'remove':  action = 'delete'; break;
-    case 'ls':      action = 'list';   break;
-    case 'inspect': action = 'read';   break;
-    default:        action = 'read';   break;
-  }
-
-  const nameCandidate = parts[3];
-  const secretPath = nameCandidate && !nameCandidate.startsWith('-') ? nameCandidate : '';
-  return { action, secretPath };
-}
-
-// ─── Environment Variables ────────────────────────────────────────────────────
-
-function parseEnv(raw: string): PartialParsed {
-  const trimmed = raw.trim();
-
-  if (/^export\s+(\w+)/i.test(trimmed)) {
-    const m = trimmed.match(/^export\s+(\w+)/i);
-    return { action: 'write', secretPath: m?.[1] ?? '' };
-  }
-
-  if (/\.env\b/.test(trimmed)) {
-    return { action: 'write', secretPath: '.env' };
-  }
-
-  return { action: 'write', secretPath: '' };
-}
-
-// ─── Main Entry Point ─────────────────────────────────────────────────────────
+// ─── Main parser ────────────────────────────────────────────────────────────
 
 export function parseSecretCommand(raw: string): ParsedSecretCommand {
-  if (!raw || !raw.trim()) {
-    throw new Error('Secret parser: empty command provided');
-  }
-
   const trimmed = raw.trim();
-  const parts = trimmed.split(/\s+/);
-  const cmd = parts[0] ?? '';
+  if (!trimmed) throw new Error('Empty command');
 
-  let tool: SecretTool = 'unknown';
-  let action: SecretAction = 'read';
-  let secretPath = '';
-  let version: string | undefined;
+  const tool = detectTool(trimmed);
+  const action = detectAction(trimmed, tool);
+  const scope = detectScope(trimmed, tool, action);
+  const secretPath = extractSecretPath(trimmed, tool);
+  const namespace = extractNamespace(trimmed);
+  const isProduction = isProductionContext(trimmed, secretPath);
+  const dangerousPatterns = detectDangerousPatterns(trimmed);
+  const flags = extractFlags(trimmed);
 
-  if (cmd === 'vault') {
-    tool = 'vault';
-    const parsed = parseVault(parts);
-    action = parsed.action;
-    secretPath = parsed.secretPath;
-    version = parsed.version;
-  } else if (cmd === 'aws') {
-    const awsSub = parts[1] ?? '';
-    if (awsSub === 'secretsmanager') {
-      tool = 'aws-secrets-manager';
-      const parsed = parseAwsSecrets(parts);
-      action = parsed.action;
-      secretPath = parsed.secretPath;
-      version = parsed.version;
-    } else if (awsSub === 'ssm') {
-      tool = 'aws-ssm';
-      const parsed = parseAwsSsm(parts);
-      action = parsed.action;
-      secretPath = parsed.secretPath;
-    }
-  } else if (cmd === 'gcloud') {
-    const gSub = parts[1] ?? '';
-    if (gSub === 'secrets') {
-      tool = 'gcp-secret-manager';
-      const parsed = parseGcloudSecrets(parts);
-      action = parsed.action;
-      secretPath = parsed.secretPath;
-      version = parsed.version;
-    }
-  } else if (cmd === 'az') {
-    const azSub1 = parts[1] ?? '';
-    const azSub2 = parts[2] ?? '';
-    if (azSub1 === 'keyvault' && azSub2 === 'secret') {
-      tool = 'azure-key-vault';
-      const parsed = parseAzureKeyVault(parts);
-      action = parsed.action;
-      secretPath = parsed.secretPath;
-    }
-  } else if (cmd === 'kubectl') {
-    const hasSecret = parts.some((p) => p === 'secret' || p === 'secrets');
-    if (hasSecret) {
-      tool = 'kubernetes';
-      const parsed = parseKubernetes(parts);
-      action = parsed.action;
-      secretPath = parsed.secretPath;
-    }
-  } else if (cmd === 'docker') {
-    const dockerSub = parts[1] ?? '';
-    if (dockerSub === 'secret') {
-      tool = 'docker';
-      const parsed = parseDocker(parts);
-      action = parsed.action;
-      secretPath = parsed.secretPath;
-    }
-  } else if (cmd === 'export' || trimmed.includes('.env')) {
-    tool = 'env';
-    const parsed = parseEnv(trimmed);
-    action = parsed.action;
-    secretPath = parsed.secretPath;
-  }
+  const exposesValue = action === 'read' || action === 'export' ||
+    /get-secret-value/.test(trimmed) || /versions\s+access/.test(trimmed) ||
+    /secret\s+show/.test(trimmed);
 
-  // Environment is inferred from the secret path first, then the full command
-  const environment = detectEnvironment(secretPath || raw);
-  const isWildcard = isWildcardPath(secretPath);
-  const hasPlaintextSecret = detectInlinePlaintext(raw);
-  const isRawOutput = detectRawOutput(raw);
+  const isOverwrite = (action === 'write' || action === 'create') &&
+    (/--overwrite/.test(trimmed) || tool === 'aws-ssm');
 
-  const result: ParsedSecretCommand = {
+  const isForce = /--force/.test(trimmed);
+
+  const isDestructive = action === 'delete' || action === 'rotate' ||
+    dangerousPatterns.some(dp => dp.severity === 'DENY');
+
+  const riskLevel = classifyRisk(action, scope, isProduction, dangerousPatterns);
+
+  return {
     raw: trimmed,
     tool,
     action,
+    scope,
+    riskLevel,
+    isDestructive,
     secretPath,
-    environment,
-    isWildcard,
-    hasPlaintextSecret,
-    isRawOutput,
-    metadata: {
-      parsedAt: new Date().toISOString(),
+    namespace,
+    exposesValue,
+    isOverwrite,
+    isProduction,
+    isForce,
+    dangerousPatterns,
+    parameters: {
+      ...(secretPath ? { secretPath } : {}),
+      ...(namespace ? { namespace } : {}),
     },
+    flags,
+    metadata: {},
   };
-
-  if (version !== undefined) {
-    result.version = version;
-  }
-
-  return result;
 }

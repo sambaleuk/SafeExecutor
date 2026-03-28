@@ -1,86 +1,143 @@
-// ─── Secret Tool ─────────────────────────────────────────────────────────────
+import type { RiskLevel } from '../../types/index.js';
 
 export type SecretTool =
   | 'vault'
-  | 'aws-secrets-manager'
+  | 'aws-secrets'
   | 'aws-ssm'
-  | 'gcp-secret-manager'
-  | 'azure-key-vault'
-  | 'kubernetes'
-  | 'docker'
-  | 'env'
+  | 'gcloud-secrets'
+  | 'az-keyvault'
+  | 'kubectl-secrets'
+  | 'docker-secrets'
+  | 'env-export'
   | 'unknown';
 
-// ─── Secret Action ───────────────────────────────────────────────────────────
+export type SecretAction =
+  | 'read'
+  | 'write'
+  | 'delete'
+  | 'list'
+  | 'rotate'
+  | 'export'
+  | 'create'
+  | 'unknown';
 
-export type SecretAction = 'read' | 'write' | 'delete' | 'list' | 'rotate';
+export type SecretScope =
+  | 'single'
+  | 'namespace'
+  | 'global'
+  | 'unknown';
 
-// ─── Environment ─────────────────────────────────────────────────────────────
+export interface DangerousPattern {
+  pattern: string;
+  description: string;
+  severity: 'HIGH' | 'CRITICAL' | 'DENY';
+}
 
-export type SecretEnvironment = 'production' | 'staging' | 'development' | 'unknown';
+export interface ValidationResult {
+  check: string;
+  passed: boolean;
+  message: string;
+}
 
-// ─── Parsed Command ──────────────────────────────────────────────────────────
-
+/**
+ * Parsed secrets command intent — TIntent for SafeAdapter<ParsedSecretCommand, SecretSnapshot>.
+ */
 export interface ParsedSecretCommand {
   raw: string;
   tool: SecretTool;
   action: SecretAction;
-  secretPath: string;
-  version?: string;
-  environment: SecretEnvironment;
-  isWildcard: boolean;
-  hasPlaintextSecret: boolean;
-  isRawOutput: boolean;
+  scope: SecretScope;
+  riskLevel: RiskLevel;
+  isDestructive: boolean;
+  /** Secret path/key being targeted */
+  secretPath?: string;
+  /** Namespace or project context */
+  namespace?: string;
+  /** True when the command would expose a secret value in stdout */
+  exposesValue: boolean;
+  /** True when the command writes/overwrites an existing secret */
+  isOverwrite: boolean;
+  /** True when the command targets production secrets */
+  isProduction: boolean;
+  /** True when the command uses --force or equivalent */
+  isForce: boolean;
+  /** Detected dangerous patterns */
+  dangerousPatterns: DangerousPattern[];
+  parameters: Record<string, string>;
+  flags: string[];
   metadata: Record<string, unknown>;
 }
 
-// ─── Leak Detection ──────────────────────────────────────────────────────────
-
-export interface LeakPattern {
-  name: string;
-  pattern: RegExp;
-  severity: 'HIGH' | 'CRITICAL';
-}
-
+/**
+ * Result of scanning a string for leaked secrets.
+ */
 export interface LeakDetectionResult {
-  hasLeak: boolean;
-  patterns: string[];
+  hasLeaks: boolean;
+  leaks: DetectedLeak[];
+  maskedValue: string;
+}
+
+export interface DetectedLeak {
+  type: LeakType;
+  value: string;
   masked: string;
-  isExfiltration: boolean;
+  position: { start: number; end: number };
 }
 
-// ─── Sandbox ─────────────────────────────────────────────────────────────────
+export type LeakType =
+  | 'aws-access-key'
+  | 'aws-secret-key'
+  | 'github-pat'
+  | 'github-oauth'
+  | 'jwt'
+  | 'private-key'
+  | 'generic-api-key'
+  | 'generic-secret';
 
-export interface SecretSandboxOutcome {
-  feasible: boolean;
-  secretExists: boolean;
-  dependentsCount: number;
-  validationErrors: string[];
-  plan: string;
-  durationMs: number;
+/**
+ * Snapshot captured before execution — used by rollback().
+ */
+export interface SecretSnapshot {
+  commandId: string;
+  timestamp: Date;
+  /** Previous secret version or value hash (never the actual value) */
+  previousVersionId?: string;
+  preState: string;
 }
 
-// ─── Adapter Options ─────────────────────────────────────────────────────────
+export interface SecretRuleMatch {
+  tools?: SecretTool[];
+  actions?: SecretAction[];
+  scopes?: SecretScope[];
+  exposesValue?: boolean;
+  isOverwrite?: boolean;
+  isProduction?: boolean;
+  isForce?: boolean;
+}
 
-export interface SecretsAdapterOptions {
-  /**
-   * When true (default), commands are validated and audited but never executed.
-   * Set to false only when CLI tools (vault, aws, gcloud, az, kubectl) are available.
-   */
-  dryRunOnly?: boolean;
+export interface SecretPolicyRule {
+  id: string;
+  description: string;
+  match: SecretRuleMatch;
+  action: 'allow' | 'deny' | 'require_approval' | 'require_dry_run';
+  riskLevel: RiskLevel;
+  message?: string;
+}
 
-  /**
-   * Allowlist of secret path prefixes. If set, only paths matching these prefixes are permitted.
-   */
-  allowedPaths?: string[];
+export interface SecretPolicy {
+  version: string;
+  rules: SecretPolicyRule[];
+  defaults: {
+    allowUnknown: boolean;
+    defaultRiskLevel: RiskLevel;
+  };
+}
 
-  /**
-   * Blocklist of secret path prefixes. Commands targeting these paths are denied.
-   */
-  blockedPaths?: string[];
-
-  /**
-   * Override environment classification for all operations (e.g. force 'production' for extra caution).
-   */
-  environment?: SecretEnvironment;
+export interface SecretPolicyDecision {
+  allowed: boolean;
+  riskLevel: RiskLevel;
+  requiresDryRun: boolean;
+  requiresApproval: boolean;
+  matchedRules: SecretPolicyRule[];
+  message: string;
 }

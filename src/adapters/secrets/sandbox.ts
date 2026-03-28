@@ -1,200 +1,164 @@
-import type { ParsedSecretCommand, SecretEnvironment, SecretSandboxOutcome, SecretsAdapterOptions } from './types.js';
+import type { SimulationResult } from '../../core/types.js';
+import type { ParsedSecretCommand, ValidationResult } from './types.js';
+import { detectLeaks } from './leak-detector.js';
+
+function buildSummary(
+  parsed: ParsedSecretCommand,
+  warnings: string[],
+  validations: ValidationResult[],
+): string {
+  const lines: string[] = [
+    '[DRY-RUN] Secrets Command Preview',
+    `Tool       : ${parsed.tool}`,
+    `Action     : ${parsed.action}`,
+    `Scope      : ${parsed.scope}`,
+  ];
+  if (parsed.secretPath) lines.push(`Secret     : ${parsed.secretPath}`);
+  if (parsed.namespace) lines.push(`Namespace  : ${parsed.namespace}`);
+  if (Object.keys(parsed.parameters).length > 0) {
+    lines.push(`Parameters : ${JSON.stringify(parsed.parameters)}`);
+  }
+  if (warnings.length > 0) {
+    lines.push('');
+    lines.push('Warnings:');
+    for (const w of warnings) lines.push(`  ⚠  ${w}`);
+  }
+  if (validations.length > 0) {
+    lines.push('');
+    lines.push('Validations:');
+    for (const v of validations) {
+      lines.push(`  ${v.passed ? '✓' : '✗'}  ${v.check}: ${v.message}`);
+    }
+  }
+  return lines.join('\n');
+}
 
 /**
- * Secret Sandbox
+ * Secrets sandbox — static validation without executing the command.
  *
- * Simulates secret operations without touching any vault.
- *
- * Strategy:
- *   - read    → metadata-only plan (no actual secret value accessed)
- *   - write   → format/policy validation (length, complexity hints)
- *   - delete  → dependency analysis (simulated — cannot check without live inventory)
- *   - list    → scope assessment
- *   - rotate  → impact assessment
- *
- * DENY cases (feasible: false):
- *   - Raw output flags on production secrets (-o yaml/-o json) — exposes plaintext
- *   - Wildcard delete — irreversible mass operation
- *   - Path is on the explicit blocklist
+ * Returns a SimulationResult compatible with SafeAdapter<TIntent>.sandbox().
+ * DENY patterns (force-delete, purge, wildcard-delete) set feasible=false.
+ * Warnings (production targets, value exposure) are surfaced for the approval gate.
  */
+export async function simulateSecretCommand(parsed: ParsedSecretCommand): Promise<SimulationResult> {
+  const start = Date.now();
+  const warnings: string[] = [];
+  const validations: ValidationResult[] = [];
 
-export class SecretSandbox {
-  constructor(private readonly options: SecretsAdapterOptions = {}) {}
-
-  simulate(parsed: ParsedSecretCommand): SecretSandboxOutcome {
-    const start = Date.now();
-    const validationErrors: string[] = [];
-
-    // Use environment override from options if provided
-    const effectiveEnv: SecretEnvironment = this.options.environment ?? parsed.environment;
-
-    // ── Hard DENY: raw output on production ────────────────────────────────
-    if (parsed.isRawOutput && effectiveEnv === 'production') {
+  // ── DENY patterns — hard stop ──────────────────────────────────────────────
+  for (const dp of parsed.dangerousPatterns) {
+    if (dp.severity === 'DENY') {
+      const msg = `DENIED: ${dp.description}`;
       return {
         feasible: false,
-        secretExists: false,
-        dependentsCount: 0,
-        validationErrors: [
-          'Raw output format (-o yaml/-o json) exposes production secrets in plaintext',
-        ],
-        plan: [
-          'DENIED: Raw output on production secret',
-          `Tool: ${parsed.tool}`,
-          `Path: ${parsed.secretPath}`,
-          'Reason: Output flags like -o yaml expose the secret value in the command output.',
-          'Fix: Remove the -o yaml/-o json flag, or use a targeted field selector (e.g. -o jsonpath).',
-        ].join('\n'),
+        resourcesImpacted: 0,
+        summary: msg,
+        warnings: [`Dangerous pattern '${dp.pattern}': ${dp.description}`],
         durationMs: Date.now() - start,
       };
     }
-
-    // ── Hard DENY: wildcard delete ─────────────────────────────────────────
-    if (parsed.action === 'delete' && parsed.isWildcard) {
-      return {
-        feasible: false,
-        secretExists: false,
-        dependentsCount: 0,
-        validationErrors: ['Wildcard delete is not allowed — specify an exact secret path'],
-        plan: [
-          'DENIED: Wildcard delete operation',
-          `Tool: ${parsed.tool}`,
-          `Path: ${parsed.secretPath || '(root)'}`,
-          'Reason: Mass deletion of secrets is irreversible and not permitted.',
-        ].join('\n'),
-        durationMs: Date.now() - start,
-      };
-    }
-
-    // ── Warnings (non-blocking) ────────────────────────────────────────────
-    if (parsed.isRawOutput && effectiveEnv !== 'production') {
-      validationErrors.push(
-        `Raw output format on ${effectiveEnv} secret — value will be visible in plaintext`,
-      );
-    }
-
-    if (parsed.isWildcard && effectiveEnv === 'production' && parsed.action === 'list') {
-      validationErrors.push(
-        'Listing all production secrets is a broad access operation — approval recommended',
-      );
-    }
-
-    // ── Simulate by action ─────────────────────────────────────────────────
-    switch (parsed.action) {
-      case 'read': {
-        return {
-          feasible: true,
-          secretExists: true, // optimistic — cannot verify without credentials
-          dependentsCount: 0,
-          validationErrors,
-          plan: this.planRead(parsed, effectiveEnv),
-          durationMs: Date.now() - start,
-        };
-      }
-
-      case 'write': {
-        return {
-          feasible: true,
-          secretExists: false, // unknown — may or may not exist
-          dependentsCount: 0,
-          validationErrors,
-          plan: this.planWrite(parsed, effectiveEnv),
-          durationMs: Date.now() - start,
-        };
-      }
-
-      case 'delete': {
-        return {
-          feasible: true,
-          secretExists: true,
-          dependentsCount: 0, // unknown without live service inventory
-          validationErrors,
-          plan: this.planDelete(parsed, effectiveEnv),
-          durationMs: Date.now() - start,
-        };
-      }
-
-      case 'list': {
-        return {
-          feasible: true,
-          secretExists: true,
-          dependentsCount: 0,
-          validationErrors,
-          plan: [
-            `Would list secrets at: ${parsed.secretPath || '(root)'}`,
-            `Tool: ${parsed.tool}`,
-            `Environment: ${effectiveEnv}`,
-            parsed.isWildcard ? 'Scope: ALL secrets (wildcard)' : `Scope: ${parsed.secretPath}`,
-          ].join('\n'),
-          durationMs: Date.now() - start,
-        };
-      }
-
-      case 'rotate': {
-        return {
-          feasible: true,
-          secretExists: true,
-          dependentsCount: 0,
-          validationErrors,
-          plan: [
-            `Would rotate secret: ${parsed.secretPath}`,
-            `Tool: ${parsed.tool}`,
-            `Environment: ${effectiveEnv}`,
-            'Impact: All services using this secret must be updated or will fail after rotation.',
-            'Recommendation: Ensure zero-downtime rotation is configured before proceeding.',
-          ].join('\n'),
-          durationMs: Date.now() - start,
-        };
-      }
-
-      default: {
-        // TypeScript exhaustive check
-        const _unreachable: never = parsed.action;
-        throw new Error(`SecretSandbox: unhandled action '${String(_unreachable)}'`);
-      }
-    }
   }
 
-  private planRead(parsed: ParsedSecretCommand, env: SecretEnvironment): string {
-    const lines = [
-      `Would read secret metadata: ${parsed.secretPath}`,
-      `Tool: ${parsed.tool}`,
-      `Environment: ${env}`,
-    ];
-    if (parsed.version) {
-      lines.push(`Version: ${parsed.version}`);
-    }
-    if (parsed.isRawOutput) {
-      lines.push('WARNING: Output flags will expose the secret value in plaintext');
-    }
-    lines.push('Dry-run: Only verifying access path — no secret value will be read');
-    return lines.join('\n');
+  // ── Production delete without approval — hard stop ─────────────────────────
+  if (parsed.action === 'delete' && parsed.isProduction) {
+    const msg = 'DENIED: Cannot delete production secrets without explicit approval workflow';
+    return {
+      feasible: false,
+      resourcesImpacted: 0,
+      summary: msg,
+      warnings: [msg],
+      durationMs: Date.now() - start,
+    };
   }
 
-  private planWrite(parsed: ParsedSecretCommand, env: SecretEnvironment): string {
-    return [
-      `Would write secret: ${parsed.secretPath}`,
-      `Tool: ${parsed.tool}`,
-      `Environment: ${env}`,
-      'Dry-run: Secret value not available for format validation in simulation mode',
-      env === 'production'
-        ? 'CAUTION: Writing to production — ensure the value is from a secure source' : '',
-    ]
-      .filter(Boolean)
-      .join('\n');
+  // ── Leak detection in command itself ───────────────────────────────────────
+  const leakResult = detectLeaks(parsed.raw);
+  if (leakResult.hasLeaks) {
+    warnings.push(
+      `Command contains ${leakResult.leaks.length} potential secret(s) in plaintext — ` +
+      `types: ${leakResult.leaks.map(l => l.type).join(', ')}`
+    );
+    validations.push({
+      check: 'leak-detection',
+      passed: false,
+      message: 'Secret values detected in command text — use references, not inline values',
+    });
   }
 
-  private planDelete(parsed: ParsedSecretCommand, env: SecretEnvironment): string {
-    return [
-      `Would delete secret: ${parsed.secretPath}`,
-      `Tool: ${parsed.tool}`,
-      `Environment: ${env}`,
-      'Dependency check: Cannot verify live dependents without service inventory',
-      'WARNING: Deletion may be irreversible — verify no active services depend on this secret',
-      env === 'production'
-        ? 'CRITICAL: Production secret deletion — impact may be immediate and widespread'
-        : '',
-    ]
-      .filter(Boolean)
-      .join('\n');
+  // ── Value exposure check ──────────────────────────────────────────────────
+  if (parsed.exposesValue) {
+    warnings.push('This command will expose a secret value in stdout');
+    validations.push({
+      check: 'value-exposure',
+      passed: false,
+      message: 'Secret value will be printed to stdout — ensure output is not logged',
+    });
   }
+
+  // ── Production target ─────────────────────────────────────────────────────
+  if (parsed.isProduction) {
+    warnings.push('Targeting PRODUCTION secrets — elevated risk');
+    validations.push({
+      check: 'production-target',
+      passed: false,
+      message: 'Production secret operations require explicit approval',
+    });
+  }
+
+  // ── Overwrite check ───────────────────────────────────────────────────────
+  if (parsed.isOverwrite) {
+    warnings.push('This command will overwrite an existing secret value');
+    validations.push({
+      check: 'overwrite',
+      passed: false,
+      message: 'Secret overwrite detected — ensure previous version is backed up',
+    });
+  }
+
+  // ── Force flag ────────────────────────────────────────────────────────────
+  if (parsed.isForce) {
+    warnings.push('Force flag detected — safety confirmations bypassed');
+    validations.push({
+      check: 'force-flag',
+      passed: false,
+      message: '--force bypasses safety prompts',
+    });
+  }
+
+  // ── Destructive action ────────────────────────────────────────────────────
+  if (parsed.isDestructive) {
+    warnings.push(`Destructive action '${parsed.action}' — may cause data loss`);
+    validations.push({
+      check: 'destructive-action',
+      passed: false,
+      message: `Action '${parsed.action}' can permanently remove secrets`,
+    });
+  }
+
+  // ── Safe actions ──────────────────────────────────────────────────────────
+  if (parsed.action === 'list') {
+    validations.push({
+      check: 'safe-action',
+      passed: true,
+      message: "Action 'list' is non-destructive — lists secret names only",
+    });
+  }
+
+  if (parsed.action === 'read' && !parsed.isProduction) {
+    validations.push({
+      check: 'read-non-prod',
+      passed: true,
+      message: 'Reading non-production secret — lower risk',
+    });
+  }
+
+  const summary = buildSummary(parsed, warnings, validations);
+
+  return {
+    feasible: true,
+    resourcesImpacted: parsed.scope === 'single' ? 1 : -1,
+    summary,
+    warnings,
+    durationMs: Date.now() - start,
+  };
 }
