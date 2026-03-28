@@ -135,3 +135,18 @@ export type {
   DangerousPattern as SecretDangerousPattern,
   ValidationResult as SecretValidationResult,
 } from './adapters/secrets/index.js';
+
+// ── Git Adapter ───────────────────────────────────────────────────────────────
+export { GitAdapter, evaluateGitPolicy } from './adapters/git/index.js';
+export { parseGitCommand } from './adapters/git/index.js';
+export { simulateGitCommand } from './adapters/git/index.js';
+export type {
+  GitAction,
+  ParsedGitCommand,
+  GitSnapshot,
+  GitPolicy,
+  GitPolicyRule,
+  GitPolicyDecision,
+  GitRuleMatch,
+  GitDangerousPattern,
+} from './adapters/git/index.js';
