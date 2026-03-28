@@ -1,0 +1,208 @@
+{
+  "version": "1.0",
+  "rules": [
+    {
+      "id": "deny-force-push-main",
+      "description": "Force push to main/master is unconditionally forbidden",
+      "match": {
+        "actions": ["force-push"],
+        "isProtectedBranch": true
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "Force pushing to main/master is forbidden. Use a PR and merge strategy instead."
+    },
+    {
+      "id": "deny-hard-reset-main",
+      "description": "Hard reset on main/master destroys history and is forbidden",
+      "match": {
+        "actions": ["reset"],
+        "isProtectedBranch": true,
+        "flags": ["--hard"]
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "Hard reset on main/master is forbidden. Revert commits instead."
+    },
+    {
+      "id": "deny-filter-branch",
+      "description": "git filter-branch on shared refs rewrites published history",
+      "match": {
+        "actions": ["unknown"],
+        "rewritesHistory": true,
+        "isProtectedBranch": true
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "message": "Rewriting history on shared/protected branches is forbidden."
+    },
+    {
+      "id": "approve-force-push",
+      "description": "Force push to any branch requires human approval",
+      "match": {
+        "actions": ["force-push"]
+      },
+      "action": "require_approval",
+      "riskLevel": "CRITICAL",
+      "message": "Force push rewrites remote history — requires explicit approval and team coordination."
+    },
+    {
+      "id": "approve-rebase-shared",
+      "description": "Rebasing on protected branches requires approval",
+      "match": {
+        "actions": ["rebase"],
+        "isProtectedBranch": true
+      },
+      "action": "require_approval",
+      "riskLevel": "CRITICAL",
+      "message": "Rebasing onto a protected branch requires approval — this rewrites shared history."
+    },
+    {
+      "id": "approve-rebase",
+      "description": "All rebase operations require approval",
+      "match": {
+        "actions": ["rebase"]
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "Rebase rewrites commit history — requires approval."
+    },
+    {
+      "id": "approve-branch-force-delete",
+      "description": "Force branch deletion (-D) skips the merge check",
+      "match": {
+        "actions": ["branch-delete"],
+        "isForce": true
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "Force branch deletion bypasses the unmerged-commits check — requires approval."
+    },
+    {
+      "id": "approve-branch-delete",
+      "description": "All branch deletions require approval",
+      "match": {
+        "actions": ["branch-delete"]
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "Branch deletion requires explicit approval."
+    },
+    {
+      "id": "approve-tag-delete",
+      "description": "Tag deletion requires approval",
+      "match": {
+        "actions": ["tag-delete"]
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "Tag deletion requires approval — tags may mark releases."
+    },
+    {
+      "id": "approve-clean",
+      "description": "git clean removes untracked files — requires approval",
+      "match": {
+        "actions": ["clean"]
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "git clean permanently removes untracked files — requires approval."
+    },
+    {
+      "id": "approve-reflog-expire",
+      "description": "Expiring reflog removes the safety net for recovery",
+      "match": {
+        "actions": ["reflog-expire"]
+      },
+      "action": "require_approval",
+      "riskLevel": "CRITICAL",
+      "message": "Expiring reflog entries makes past states unrecoverable — requires approval."
+    },
+    {
+      "id": "approve-gc-prune",
+      "description": "gc --prune permanently deletes unreachable objects",
+      "match": {
+        "actions": ["gc"]
+      },
+      "action": "require_approval",
+      "riskLevel": "CRITICAL",
+      "message": "git gc --prune permanently deletes unreachable git objects — requires approval."
+    },
+    {
+      "id": "high-commit-amend",
+      "description": "Amending pushed commits rewrites published history",
+      "match": {
+        "actions": ["commit-amend"],
+        "rewritesHistory": true
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "Amending a commit that may have been pushed will cause history divergence."
+    },
+    {
+      "id": "dry-run-commit-amend",
+      "description": "Commit amend requires dry-run review",
+      "match": {
+        "actions": ["commit-amend"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "HIGH",
+      "message": "Commit amend requires dry-run — verify the amendment will not rewrite pushed commits."
+    },
+    {
+      "id": "dry-run-reset",
+      "description": "Reset requires dry-run to preview impact",
+      "match": {
+        "actions": ["reset"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "HIGH",
+      "message": "Reset requires dry-run — verify target ref and scope of change."
+    },
+    {
+      "id": "dry-run-stash-drop",
+      "description": "Stash drop permanently removes stash entries",
+      "match": {
+        "actions": ["stash-drop"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "HIGH",
+      "message": "Stash drop is irreversible — review stash contents before dropping."
+    },
+    {
+      "id": "auto-approve-readonly",
+      "description": "Read-only operations (status, log, diff, show) are always safe",
+      "match": {
+        "actions": ["status", "log", "diff", "show", "branch-list", "stash-list", "remote"]
+      },
+      "action": "allow",
+      "riskLevel": "LOW",
+      "message": "Read-only git operation — auto-approved."
+    },
+    {
+      "id": "auto-approve-fetch",
+      "description": "Fetching from remote is non-destructive",
+      "match": {
+        "actions": ["fetch"]
+      },
+      "action": "allow",
+      "riskLevel": "LOW",
+      "message": "git fetch only updates remote-tracking refs — auto-approved."
+    },
+    {
+      "id": "dry-run-push-main",
+      "description": "Pushing to protected branches requires dry-run",
+      "match": {
+        "actions": ["push"],
+        "isProtectedBranch": true
+      },
+      "action": "require_dry_run",
+      "riskLevel": "HIGH",
+      "message": "Pushing to a protected branch requires dry-run preview."
+    }
+  ],
+  "defaults": {
+    "allowUnknown": true,
+    "defaultRiskLevel": "MEDIUM"
+  }
+}
