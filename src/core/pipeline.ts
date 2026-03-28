@@ -1,8 +1,5 @@
-import { parseIntent } from './intent-parser.js';
 import { evaluatePolicy } from './policy-engine.js';
-import { runSandbox } from './sandbox.js';
 import { requestApproval } from './approval-gate.js';
-import { executeWithRollback } from './executor.js';
 import { writeAuditEntry, generateAuditId } from './audit.js';
 import type {
   SafeExecutorConfig,
@@ -11,7 +8,7 @@ import type {
   PipelineResult,
   AuditEntry,
 } from '../types/index.js';
-import type { DatabaseAdapter } from '../adapters/adapter.interface.js';
+import type { SafeAdapter } from '../adapters/adapter.interface.js';
 
 /**
  * Pipeline Orchestrator
@@ -19,26 +16,31 @@ import type { DatabaseAdapter } from '../adapters/adapter.interface.js';
  * Sequences all 6 layers in strict order. Each gate must pass before
  * the next is entered. No gate can be skipped.
  *
+ * The pipeline is completely domain-agnostic — it delegates parsing,
+ * sandboxing, and execution to the SafeAdapter. The adapter determines
+ * what "SQL", "cloud", "filesystem", or "API" means; the pipeline only
+ * enforces the gate sequence and policy contracts.
+ *
  * Gate sequence:
- *   1. Intent Parser   → classify the operation
- *   2. Policy Engine   → evaluate against rules
- *   3. Sandbox         → simulate (if required by policy)
- *   4. Approval Gate   → human or automated approval
- *   5. Executor        → execute with rollback protection
- *   6. Audit Trail     → record everything
+ *   1. Intent Parser   → adapter.parseIntent() — classify the operation
+ *   2. Policy Engine   → evaluatePolicy()      — evaluate against rules
+ *   3. Sandbox         → adapter.sandbox()     — simulate (if required)
+ *   4. Approval Gate   → requestApproval()     — human or automated approval
+ *   5. Executor        → adapter.execute()     — execute with rollback protection
+ *   6. Audit Trail     → writeAuditEntry()     — record everything
  */
 
 export class SafeExecutorPipeline {
   constructor(
     private readonly config: SafeExecutorConfig,
     private readonly policy: Policy,
-    private readonly adapter: DatabaseAdapter,
+    private readonly adapter: SafeAdapter,
   ) {}
 
-  async run(sql: string, requestedBy?: string): Promise<PipelineResult> {
+  async run(raw: string, requestedBy?: string): Promise<PipelineResult> {
     const ctx: PipelineContext = {
       config: this.config,
-      sql,
+      sql: raw,
       intent: null,
       policyDecision: null,
       sandboxResult: null,
@@ -50,7 +52,7 @@ export class SafeExecutorPipeline {
 
     try {
       // ── Gate 1: Intent Parser ──────────────────────────────────────────
-      ctx.intent = parseIntent(sql);
+      ctx.intent = await this.adapter.parseIntent(raw);
       ctx.auditEntry.operation = ctx.intent;
 
       // ── Gate 2: Policy Engine ──────────────────────────────────────────
@@ -63,7 +65,7 @@ export class SafeExecutorPipeline {
 
       // ── Gate 3: Sandbox (conditional) ─────────────────────────────────
       if (ctx.policyDecision.requiresDryRun) {
-        ctx.sandboxResult = await runSandbox(ctx.intent, this.adapter);
+        ctx.sandboxResult = await this.adapter.sandbox(ctx.intent);
         ctx.auditEntry.sandboxResult = ctx.sandboxResult;
 
         // Update intent with row estimate from sandbox
@@ -88,14 +90,16 @@ export class SafeExecutorPipeline {
         ctx.auditEntry.approvalResponse = ctx.approvalResponse;
 
         if (ctx.approvalResponse.status === 'rejected') {
-          return this.abort(ctx, `Approval rejected: ${ctx.approvalResponse.comment ?? 'no reason given'}`);
+          return this.abort(
+            ctx,
+            `Approval rejected: ${ctx.approvalResponse.comment ?? 'no reason given'}`,
+          );
         }
       }
 
       // ── Gate 5: Execute ────────────────────────────────────────────────
-      ctx.executionResult = await executeWithRollback(
+      ctx.executionResult = await this.adapter.execute(
         ctx.intent,
-        this.adapter,
         this.config,
         ctx.sandboxResult?.estimatedRowsAffected ?? null,
       );
@@ -134,8 +138,12 @@ export class SafeExecutorPipeline {
       timestamp: ctx.startedAt,
       executor: ctx.config.executor,
       operation: ctx.intent ?? {
-        raw: ctx.sql,
+        domain: ctx.config.database?.adapter ?? 'unknown',
         type: 'UNKNOWN',
+        raw: ctx.sql,
+        target: { name: 'unknown', type: 'unknown', affectedResources: [] },
+        scope: 'single',
+        riskFactors: [],
         tables: [],
         hasWhereClause: false,
         estimatedRowsAffected: null,

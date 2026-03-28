@@ -1,0 +1,24 @@
+{
+  "version": "1.0",
+  "environment": "production",
+  "executor": "benchmark-runner",
+  "database": {
+    "adapter": "postgres",
+    "connectionString": "postgresql://postgres:FAanl100921%21@db.oslhwchaxstnloixpgxc.supabase.co:6543/postgres",
+    "schema": "public",
+    "maxRowsThreshold": 10000
+  },
+  "policy": {
+    "file": "./config/default-policy.json",
+    "strictMode": true
+  },
+  "approval": {
+    "mode": "auto",
+    "timeoutSeconds": 30
+  },
+  "audit": {
+    "enabled": true,
+    "output": "file",
+    "filePath": "./logs/benchmark-audit.log"
+  }
+}

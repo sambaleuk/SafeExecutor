@@ -1,16 +1,7 @@
-import type { ParsedCicdCommand, CicdSandboxResult, ValidationResult } from './types.js';
+import type { SimulationResult } from '../../core/types.js';
+import type { ParsedCicdCommand, ValidationResult } from './types.js';
 
-function makeResult(
-  feasible: boolean,
-  preview: string,
-  warnings: string[],
-  validations: ValidationResult[],
-  durationMs: number,
-): CicdSandboxResult {
-  return { feasible, preview, warnings, validations, durationMs };
-}
-
-function buildPreview(
+function buildSummary(
   parsed: ParsedCicdCommand,
   warnings: string[],
   validations: ValidationResult[],
@@ -41,14 +32,14 @@ function buildPreview(
 }
 
 /**
- * CI/CD sandbox layer.
+ * CI/CD sandbox — static validation without executing the command.
  *
- * Performs static validation without executing the command:
- * - Rejects DENY-severity dangerous patterns immediately
- * - Flags missing version pins, force flags, privileged containers
- * - Warns about production targets and public registry pushes
+ * Returns a SimulationResult compatible with SafeAdapter<TIntent>.sandbox().
+ * Only hard-DENY patterns (root mount, latest-to-prod) set feasible=false.
+ * Warnings (production targets, force flags, public registry) are surfaced
+ * but leave feasibility to the approval gate.
  */
-export async function runCicdSandbox(parsed: ParsedCicdCommand): Promise<CicdSandboxResult> {
+export async function simulateCicdCommand(parsed: ParsedCicdCommand): Promise<SimulationResult> {
   const start = Date.now();
   const warnings: string[] = [];
   const validations: ValidationResult[] = [];
@@ -57,13 +48,33 @@ export async function runCicdSandbox(parsed: ParsedCicdCommand): Promise<CicdSan
   for (const dp of parsed.dangerousPatterns) {
     if (dp.severity === 'DENY') {
       const msg = `DENIED: ${dp.description}`;
-      return makeResult(false, msg, [`Dangerous pattern '${dp.pattern}': ${dp.description}`], [
-        { check: dp.pattern, passed: false, message: dp.description },
-      ], Date.now() - start);
+      return {
+        feasible: false,
+        resourcesImpacted: 0,
+        summary: msg,
+        warnings: [`Dangerous pattern '${dp.pattern}': ${dp.description}`],
+        durationMs: Date.now() - start,
+      };
     }
   }
 
-  // ── Docker image tag pinning ───────────────────────────────────────────────
+  // ── Production deploy without version tag — hard stop ─────────────────────
+  if (
+    parsed.action === 'deploy' &&
+    parsed.environment === 'production' &&
+    !parsed.hasSpecificTag
+  ) {
+    const msg = "DENIED: Cannot deploy 'latest' to production — specify an explicit version tag";
+    return {
+      feasible: false,
+      resourcesImpacted: 0,
+      summary: msg,
+      warnings: [msg],
+      durationMs: Date.now() - start,
+    };
+  }
+
+  // ── Docker image tag pinning (non-build actions) ───────────────────────────
   if (parsed.tool === 'docker' && parsed.action !== 'build') {
     const pinned = parsed.hasSpecificTag;
     validations.push({
@@ -74,23 +85,6 @@ export async function runCicdSandbox(parsed: ParsedCicdCommand): Promise<CicdSan
         : "Image uses implicit 'latest' — no version pinning",
     });
     if (!pinned) warnings.push("Using 'latest' tag is dangerous — pin to an explicit version");
-  }
-
-  // ── Production deploy without specific tag — hard stop ────────────────────
-  if (
-    parsed.action === 'deploy' &&
-    parsed.environment === 'production' &&
-    !parsed.hasSpecificTag
-  ) {
-    const msg = "DENIED: Cannot deploy 'latest' to production — specify an explicit version tag";
-    validations.push({ check: 'prod-tag-pinning', passed: false, message: msg });
-    return makeResult(
-      false,
-      msg,
-      [...warnings, msg],
-      validations,
-      Date.now() - start,
-    );
   }
 
   // ── Production target ──────────────────────────────────────────────────────
@@ -135,7 +129,7 @@ export async function runCicdSandbox(parsed: ParsedCicdCommand): Promise<CicdSan
     });
   }
 
-  // ── Staging / preview deploys — informational ──────────────────────────────
+  // ── Staging / preview — informational ─────────────────────────────────────
   if (parsed.environment === 'staging' || parsed.environment === 'preview') {
     validations.push({
       check: 'non-prod-target',
@@ -153,12 +147,13 @@ export async function runCicdSandbox(parsed: ParsedCicdCommand): Promise<CicdSan
     });
   }
 
-  // Sandbox feasibility: only hard DENY cases (dangerous mount, latest to prod) make this false.
-  // Production warnings and approval requirements are surfaced as warnings but remain feasible —
-  // it is the approval gate's job to gate production, not the sandbox.
-  const feasible = true;
+  const summary = buildSummary(parsed, warnings, validations);
 
-  const preview = buildPreview(parsed, warnings, validations);
-
-  return makeResult(feasible, preview, warnings, validations, Date.now() - start);
+  return {
+    feasible: true,
+    resourcesImpacted: -1, // unknown for CI/CD operations
+    summary,
+    warnings,
+    durationMs: Date.now() - start,
+  };
 }

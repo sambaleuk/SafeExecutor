@@ -1,0 +1,39 @@
+{
+  "version": "1.0",
+  "environment": "production",
+  "executor": "e2e-test-runner",
+  "database": {
+    "adapter": "postgres",
+    "connectionString": "postgresql://postgres:FAanl100921%21@db.oslhwchaxstnloixpgxc.supabase.co:6543/postgres",
+    "schema": "public",
+    "allowedTables": [
+      "user_profiles",
+      "legal_entities",
+      "entity_members",
+      "subscriptions",
+      "invitations",
+      "employees",
+      "pay_slips",
+      "pay_slip_lines",
+      "accounts",
+      "journals",
+      "invoices",
+      "clients",
+      "documents"
+    ],
+    "maxRowsThreshold": 10000
+  },
+  "policy": {
+    "file": "./config/default-policy.json",
+    "strictMode": true
+  },
+  "approval": {
+    "mode": "auto",
+    "timeoutSeconds": 30
+  },
+  "audit": {
+    "enabled": true,
+    "output": "file",
+    "filePath": "./logs/neubooks-e2e-audit.log"
+  }
+}

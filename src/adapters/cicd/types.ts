@@ -1,5 +1,4 @@
 import type { RiskLevel } from '../../types/index.js';
-import type { SafeParsedCommand, SafePolicyDecision, SafeSandboxResult, SafeExecutionResult } from '../../core/types.js';
 
 export type CicdTool =
   | 'github-actions'
@@ -37,14 +36,22 @@ export interface DangerousPattern {
   severity: 'HIGH' | 'CRITICAL' | 'DENY';
 }
 
+export interface ValidationResult {
+  check: string;
+  passed: boolean;
+  message: string;
+}
+
 /**
- * Parsed representation of a CI/CD command.
- * Extends SafeParsedCommand so it's compatible with SafeAdapterResult.parsed.
+ * Parsed CI/CD command intent — the TIntent type for SafeAdapter<ParsedCicdCommand, CicdSnapshot>.
  */
-export interface ParsedCicdCommand extends SafeParsedCommand {
+export interface ParsedCicdCommand {
+  raw: string;
   tool: CicdTool;
   action: CicdAction;
   environment: TargetEnvironment;
+  riskLevel: RiskLevel;
+  isDestructive: boolean;
   imageTag?: string;
   registry?: string;
   /** True when the registry is known to be public (docker.io, ghcr.io, quay.io, etc.) */
@@ -60,6 +67,17 @@ export interface ParsedCicdCommand extends SafeParsedCommand {
   dangerousPatterns: DangerousPattern[];
   parameters: Record<string, string>;
   flags: string[];
+  metadata: Record<string, unknown>;
+}
+
+/**
+ * Snapshot captured before execution — used by rollback().
+ */
+export interface CicdSnapshot {
+  commandId: string;
+  timestamp: Date;
+  /** Serialized pre-execution state (last deployed version, container IDs, etc.) */
+  preState: string;
 }
 
 export interface CicdRuleMatch {
@@ -91,18 +109,11 @@ export interface CicdPolicy {
   };
 }
 
-export interface ValidationResult {
-  check: string;
-  passed: boolean;
+export interface CicdPolicyDecision {
+  allowed: boolean;
+  riskLevel: RiskLevel;
+  requiresDryRun: boolean;
+  requiresApproval: boolean;
+  matchedRules: CicdPolicyRule[];
   message: string;
 }
-
-export interface CicdSandboxResult extends SafeSandboxResult {
-  validations: ValidationResult[];
-}
-
-export type CicdPolicyDecision = SafePolicyDecision & {
-  matchedRules: CicdPolicyRule[];
-};
-
-export type CicdExecutionResult = SafeExecutionResult;

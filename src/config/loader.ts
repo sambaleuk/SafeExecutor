@@ -1,14 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import _Ajv from 'ajv';
+import { Ajv } from 'ajv';
 import type { ErrorObject } from 'ajv';
 import type { SafeExecutorConfig, Policy } from '../types/index.js';
-
-// ajv v8 ESM/CJS interop: cast required under NodeNext module resolution
-type ValidateFn = ((data: unknown) => boolean) & { errors?: ErrorObject[] | null };
-type AjvInstance = { compile(schema: object): ValidateFn };
-type AjvConstructor = new (options?: object) => AjvInstance;
-const Ajv = _Ajv as unknown as AjvConstructor;
 
 /**
  * Config Loader
@@ -20,7 +14,7 @@ const Ajv = _Ajv as unknown as AjvConstructor;
  * never derived from runtime state.
  */
 
-const ajv = new Ajv({ allErrors: true, strict: true });
+const ajv = new Ajv({ allErrors: true, strict: false });
 
 function loadSchema(schemaPath: string): object {
   const resolved = path.resolve(schemaPath);

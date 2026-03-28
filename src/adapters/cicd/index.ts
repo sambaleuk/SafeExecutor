@@ -1,17 +1,16 @@
-export { CicdAdapter } from './adapter.js';
+export { CicdAdapter, evaluateCicdPolicy } from './adapter.js';
 export { parseCicdCommand } from './parser.js';
-export { runCicdSandbox } from './sandbox.js';
+export { simulateCicdCommand } from './sandbox.js';
 export { classifyEnvironment } from './environment-classifier.js';
 export type {
   CicdTool,
   CicdAction,
   TargetEnvironment,
   ParsedCicdCommand,
+  CicdSnapshot,
   CicdPolicy,
   CicdPolicyRule,
   CicdPolicyDecision,
-  CicdSandboxResult,
-  CicdExecutionResult,
   DangerousPattern,
   ValidationResult,
 } from './types.js';

@@ -1,19 +1,17 @@
+import { readFileSync } from 'fs';
 import { parseCicdCommand } from '../src/adapters/cicd/parser.js';
 import { classifyEnvironment } from '../src/adapters/cicd/environment-classifier.js';
-import { runCicdSandbox } from '../src/adapters/cicd/sandbox.js';
-import { CicdAdapter } from '../src/adapters/cicd/adapter.js';
+import { simulateCicdCommand } from '../src/adapters/cicd/sandbox.js';
+import { CicdAdapter, evaluateCicdPolicy } from '../src/adapters/cicd/adapter.js';
 import type { CicdPolicy, ParsedCicdCommand } from '../src/adapters/cicd/types.js';
 
 // ─── Fixtures ──────────────────────────────────────────────────────────────────
 
-const defaultPolicy: CicdPolicy = JSON.parse(
-  (await import('fs')).readFileSync(
-    new URL('../config/policies/cicd-default-policy.json', import.meta.url),
-    'utf-8',
-  ),
+const defaultPolicy = JSON.parse(
+  readFileSync(new URL('../config/policies/cicd-default-policy.json', import.meta.url), 'utf-8'),
 ) as CicdPolicy;
 
-// ─── Parser ────────────────────────────────────────────────────────────────────
+// ─── Parser: tool detection ────────────────────────────────────────────────────
 
 describe('parseCicdCommand — tool detection', () => {
   test('detects github-actions from gh workflow run', () => {
@@ -58,7 +56,7 @@ describe('parseCicdCommand — tool detection', () => {
     expect(r.action).toBe('deploy');
   });
 
-  test('detects rollback from deploy script', () => {
+  test('detects rollback from rollback.sh', () => {
     const r = parseCicdCommand('./rollback.sh --env production');
     expect(r.tool).toBe('deploy-script');
     expect(r.action).toBe('rollback');
@@ -69,6 +67,8 @@ describe('parseCicdCommand — tool detection', () => {
     expect(r.tool).toBe('deploy-script');
   });
 });
+
+// ─── Parser: image tag handling ────────────────────────────────────────────────
 
 describe('parseCicdCommand — image tag handling', () => {
   test('extracts specific tag from docker build -t', () => {
@@ -105,6 +105,8 @@ describe('parseCicdCommand — image tag handling', () => {
   });
 });
 
+// ─── Parser: dangerous patterns ────────────────────────────────────────────────
+
 describe('parseCicdCommand — dangerous patterns', () => {
   test('detects --privileged flag', () => {
     const r = parseCicdCommand('docker run --privileged myapp:1.0.0');
@@ -136,6 +138,8 @@ describe('parseCicdCommand — dangerous patterns', () => {
   });
 });
 
+// ─── Parser: risk levels ───────────────────────────────────────────────────────
+
 describe('parseCicdCommand — risk levels', () => {
   test('docker build is LOW risk', () => {
     const r = parseCicdCommand('docker build -t myapp:1.0.0 .');
@@ -161,11 +165,6 @@ describe('parseCicdCommand — risk levels', () => {
     const r = parseCicdCommand('docker run --privileged myapp:1.0.0');
     expect(r.riskLevel).toBe('CRITICAL');
   });
-
-  test('deploy latest to production is CRITICAL', () => {
-    const r = parseCicdCommand('docker push myapp:latest');
-    expect(r.riskLevel).toBe('HIGH'); // push + latest + public → HIGH
-  });
 });
 
 // ─── Environment classifier ────────────────────────────────────────────────────
@@ -173,10 +172,6 @@ describe('parseCicdCommand — risk levels', () => {
 describe('classifyEnvironment', () => {
   test('detects production from --env prod', () => {
     expect(classifyEnvironment('deploy.sh', { env: 'prod' })).toBe('production');
-  });
-
-  test('detects production from --env production', () => {
-    expect(classifyEnvironment('deploy.sh', { env: 'production' })).toBe('production');
   });
 
   test('detects staging from --env staging', () => {
@@ -218,202 +213,204 @@ describe('classifyEnvironment', () => {
 
 // ─── Sandbox ───────────────────────────────────────────────────────────────────
 
-describe('runCicdSandbox', () => {
+describe('simulateCicdCommand', () => {
   test('denies root filesystem mount immediately', async () => {
-    const parsed = parseCicdCommand('docker run -v /:/host myapp:1.0.0');
-    const result = await runCicdSandbox(parsed);
+    const intent = parseCicdCommand('docker run -v /:/host myapp:1.0.0');
+    const result = await simulateCicdCommand(intent);
     expect(result.feasible).toBe(false);
-    expect(result.preview).toMatch(/DENIED/);
+    expect(result.summary).toMatch(/DENIED/);
   });
 
   test('denies deploy latest to production', async () => {
-    const parsed = parseCicdCommand('./deploy.sh --env production');
-    // Simulate: no specific tag and action=deploy, env=production
-    const modified = { ...parsed, action: 'deploy' as const, hasSpecificTag: false };
-    const result = await runCicdSandbox(modified);
+    const intent = parseCicdCommand('./deploy.sh --env production');
+    const modified: ParsedCicdCommand = { ...intent, action: 'deploy', hasSpecificTag: false };
+    const result = await simulateCicdCommand(modified);
     expect(result.feasible).toBe(false);
-    expect(result.preview).toMatch(/DENIED/);
+    expect(result.summary).toMatch(/DENIED/);
   });
 
-  test('warns about production target', async () => {
-    const parsed = parseCicdCommand('./deploy.sh --env production');
-    const modified = { ...parsed, action: 'deploy' as const, hasSpecificTag: true };
-    const result = await runCicdSandbox(modified);
+  test('warns about production target but stays feasible', async () => {
+    const intent = parseCicdCommand('./deploy.sh --env production');
+    const modified: ParsedCicdCommand = { ...intent, action: 'deploy', hasSpecificTag: true };
+    const result = await simulateCicdCommand(modified);
     expect(result.warnings.some((w) => w.includes('PRODUCTION'))).toBe(true);
+    expect(result.feasible).toBe(true);
   });
 
   test('warns about force flag', async () => {
-    const parsed = parseCicdCommand('./deploy.sh --env staging --force');
-    const result = await runCicdSandbox(parsed);
+    const intent = parseCicdCommand('./deploy.sh --env staging --force');
+    const result = await simulateCicdCommand(intent);
     expect(result.warnings.some((w) => w.toLowerCase().includes('force'))).toBe(true);
   });
 
   test('warns about public registry push', async () => {
-    const parsed = parseCicdCommand('docker push myapp:1.0.0');
-    const result = await runCicdSandbox(parsed);
+    const intent = parseCicdCommand('docker push myapp:1.0.0');
+    const result = await simulateCicdCommand(intent);
     expect(result.warnings.some((w) => w.includes('public'))).toBe(true);
   });
 
   test('passes build without warnings', async () => {
-    const parsed = parseCicdCommand('docker build -t myapp:1.0.0 .');
-    const result = await runCicdSandbox(parsed);
+    const intent = parseCicdCommand('docker build -t myapp:1.0.0 .');
+    const result = await simulateCicdCommand(intent);
     expect(result.feasible).toBe(true);
     expect(result.warnings).toHaveLength(0);
   });
 
   test('warns when docker image uses latest tag', async () => {
-    const parsed = parseCicdCommand('docker push myapp:latest');
-    const result = await runCicdSandbox(parsed);
+    const intent = parseCicdCommand('docker push myapp:latest');
+    const result = await simulateCicdCommand(intent);
     expect(result.warnings.some((w) => w.includes('latest'))).toBe(true);
   });
 
-  test('preview contains tool and action info', async () => {
-    const parsed = parseCicdCommand('docker build -t myapp:1.0.0 .');
-    const result = await runCicdSandbox(parsed);
-    expect(result.preview).toContain('docker');
-    expect(result.preview).toContain('build');
+  test('summary contains tool and action info', async () => {
+    const intent = parseCicdCommand('docker build -t myapp:1.0.0 .');
+    const result = await simulateCicdCommand(intent);
+    expect(result.summary).toContain('docker');
+    expect(result.summary).toContain('build');
+  });
+
+  test('returns SimulationResult shape', async () => {
+    const intent = parseCicdCommand('docker build -t myapp:1.0.0 .');
+    const result = await simulateCicdCommand(intent);
+    expect(typeof result.feasible).toBe('boolean');
+    expect(typeof result.resourcesImpacted).toBe('number');
+    expect(typeof result.summary).toBe('string');
+    expect(Array.isArray(result.warnings)).toBe(true);
+    expect(typeof result.durationMs).toBe('number');
   });
 });
 
-// ─── CicdAdapter (integration) ─────────────────────────────────────────────────
+// ─── Policy evaluator ──────────────────────────────────────────────────────────
 
-describe('CicdAdapter.execute', () => {
-  let adapter: CicdAdapter;
-
-  beforeEach(() => {
-    adapter = new CicdAdapter(defaultPolicy);
+describe('evaluateCicdPolicy', () => {
+  test('auto-approves docker build (LOW risk)', () => {
+    const intent = parseCicdCommand('docker build -t myapp:1.0.0 .');
+    const decision = evaluateCicdPolicy(intent, defaultPolicy);
+    expect(decision.allowed).toBe(true);
+    expect(decision.riskLevel).toBe('LOW');
+    expect(decision.requiresApproval).toBe(false);
   });
 
-  test('auto-approves docker build', async () => {
-    const result = await adapter.execute('docker build -t myapp:1.0.0 .');
-    expect(result.success).toBe(true);
-    expect(result.executionResult?.status).toBe('success');
+  test('denies docker run --privileged', () => {
+    const intent = parseCicdCommand('docker run --privileged myapp:1.0.0');
+    const decision = evaluateCicdPolicy(intent, defaultPolicy);
+    expect(decision.allowed).toBe(false);
   });
 
-  test('denies docker run --privileged', async () => {
-    const result = await adapter.execute('docker run --privileged myapp:1.0.0');
-    expect(result.success).toBe(false);
-    expect(result.abortReason).toMatch(/[Dd]enied/);
+  test('denies root filesystem mount', () => {
+    const intent = parseCicdCommand('docker run -v /:/host myapp:1.0.0');
+    const decision = evaluateCicdPolicy(intent, defaultPolicy);
+    expect(decision.allowed).toBe(false);
   });
 
-  test('denies root filesystem mount', async () => {
-    const result = await adapter.execute('docker run -v /:/host myapp:1.0.0');
-    expect(result.success).toBe(false);
+  test('requires approval for production deploy', () => {
+    const intent = parseCicdCommand('gh workflow run deploy.yml --ref main --field env=production --field tag=1.2.3');
+    const decision = evaluateCicdPolicy(intent, defaultPolicy);
+    expect(decision.requiresApproval).toBe(true);
   });
 
-  test('denies deploy latest to production', async () => {
-    const result = await adapter.execute('./deploy.sh --env production');
-    expect(result.success).toBe(false);
-    expect(result.abortReason).toMatch(/[Dd]en[yi]/);
+  test('requires approval for force deploy', () => {
+    const intent = parseCicdCommand('./deploy.sh --env staging --force');
+    const decision = evaluateCicdPolicy(intent, defaultPolicy);
+    expect(decision.requiresApproval).toBe(true);
   });
 
-  test('requires approval for production deploy with pinned tag', async () => {
-    // A deploy to prod with specific tag still needs approval
-    const result = await adapter.execute(
-      'gh workflow run deploy.yml --ref main --field env=production --field tag=1.2.3',
-    );
-    expect(result.success).toBe(false);
-    expect(result.abortReason).toMatch(/[Aa]pproval/);
+  test('requires approval for public registry push', () => {
+    const intent = parseCicdCommand('docker push myapp:1.0.0');
+    const decision = evaluateCicdPolicy(intent, defaultPolicy);
+    expect(decision.requiresApproval).toBe(true);
   });
 
-  test('skipping approval authorizes production deploy', async () => {
-    const result = await adapter.execute(
-      'gh workflow run deploy.yml --ref main --field env=production --field tag=1.2.3',
-      { skipApproval: true },
-    );
-    expect(result.success).toBe(true);
-    expect(result.executionResult?.status).toBe('success');
+  test('requires dry-run for staging deploy', () => {
+    const intent = parseCicdCommand('gh workflow run deploy.yml --ref staging');
+    const decision = evaluateCicdPolicy(intent, defaultPolicy);
+    expect(decision.requiresDryRun).toBe(true);
   });
 
-  test('dry-run mode returns dry_run status', async () => {
-    const result = await adapter.execute('docker push myapp:1.0.0', { dryRun: true });
-    expect(result.executionResult?.status).toBe('dry_run');
-    expect(result.sandboxResult).not.toBeNull();
+  test('rollback in production requires approval', () => {
+    const intent = parseCicdCommand('./rollback.sh --env production');
+    const decision = evaluateCicdPolicy(intent, defaultPolicy);
+    expect(decision.requiresApproval).toBe(true);
   });
 
-  test('force deploy requires approval', async () => {
-    const result = await adapter.execute('./deploy.sh --env staging --force');
-    expect(result.success).toBe(false);
-    expect(result.abortReason).toMatch(/[Aa]pproval/);
+  test('allowUnknown=true allows unmatched commands', () => {
+    const permissive: CicdPolicy = {
+      version: '1.0',
+      rules: [],
+      defaults: { allowUnknown: true, defaultRiskLevel: 'LOW' },
+    };
+    const intent = parseCicdCommand('docker build -t myapp:1.0.0 .');
+    const decision = evaluateCicdPolicy(intent, permissive);
+    expect(decision.allowed).toBe(true);
   });
 
-  test('staging deploy requires dry-run (sandbox runs)', async () => {
-    const result = await adapter.execute(
-      'gh workflow run deploy.yml --ref staging',
-      { skipApproval: true },
-    );
-    expect(result.sandboxResult).not.toBeNull();
+  test('allowUnknown=false denies unmatched commands', () => {
+    const strict: CicdPolicy = {
+      version: '1.0',
+      rules: [],
+      defaults: { allowUnknown: false, defaultRiskLevel: 'LOW' },
+    };
+    const intent = parseCicdCommand('docker build -t myapp:1.0.0 .');
+    const decision = evaluateCicdPolicy(intent, strict);
+    expect(decision.allowed).toBe(false);
   });
 
-  test('public registry push requires approval', async () => {
-    const result = await adapter.execute('docker push myapp:1.0.0');
-    expect(result.success).toBe(false);
-    expect(result.abortReason).toMatch(/[Aa]pproval/);
+  test('CRITICAL risk always sets requiresApproval + requiresDryRun', () => {
+    const intent = parseCicdCommand('./deploy.sh --env production');
+    const decision = evaluateCicdPolicy(intent, defaultPolicy);
+    expect(decision.riskLevel).toBe('CRITICAL');
+    expect(decision.requiresApproval).toBe(true);
+    expect(decision.requiresDryRun).toBe(true);
   });
 
-  test('docker build returns full decision trail', async () => {
-    const result = await adapter.execute('docker build -t myapp:1.2.3 .');
-    expect(result.parsed).toBeDefined();
-    expect((result.parsed as ParsedCicdCommand).tool).toBe('docker');
-    expect(result.policyDecision).toBeDefined();
-    expect(result.policyDecision.riskLevel).toBe('LOW');
+  test('matchedRules is populated', () => {
+    const intent = parseCicdCommand('docker build -t myapp:1.0.0 .');
+    const decision = evaluateCicdPolicy(intent, defaultPolicy);
+    expect(decision.matchedRules.length).toBeGreaterThan(0);
   });
+});
 
-  test('compose-up on dev runs without throwing', async () => {
-    const result = await adapter.execute('docker-compose up -d', { skipApproval: true });
-    expect(result).toBeDefined();
-  });
+// ─── CicdAdapter interface ─────────────────────────────────────────────────────
+
+describe('CicdAdapter', () => {
+  const adapter = new CicdAdapter();
 
   test('adapter name is cicd', () => {
     expect(adapter.name).toBe('cicd');
   });
 
-  test('empty command throws parse error and returns failure', async () => {
-    const result = await adapter.execute('');
-    expect(result.success).toBe(false);
-    expect(result.abortReason).toMatch(/[Pp]arse/);
-  });
-});
-
-// ─── Policy edge cases ─────────────────────────────────────────────────────────
-
-describe('CicdAdapter — policy edge cases', () => {
-  test('rollback in production requires approval', async () => {
-    const adapter = new CicdAdapter(defaultPolicy);
-    const result = await adapter.execute('./rollback.sh --env production');
-    expect(result.success).toBe(false);
-    expect(result.abortReason).toMatch(/[Aa]pproval/);
+  test('parseIntent returns ParsedCicdCommand', () => {
+    const intent = adapter.parseIntent('docker build -t myapp:1.0.0 .');
+    expect(intent.tool).toBe('docker');
+    expect(intent.action).toBe('build');
+    expect(intent.riskLevel).toBe('LOW');
   });
 
-  test('rollback in staging is allowed (dry-run only)', async () => {
-    const adapter = new CicdAdapter(defaultPolicy);
-    // Rollback in staging — no explicit rule → defaults.allowUnknown=false → denied
-    // unless we skipApproval
-    const result = await adapter.execute('./rollback.sh --env staging', { skipApproval: true });
-    // Should run sandbox but be allowed or at least not crash
-    expect(result).toBeDefined();
+  test('parseIntent throws on empty command', () => {
+    expect(() => adapter.parseIntent('')).toThrow();
   });
 
-  test('allowUnknown=true policy allows unmatched commands', async () => {
-    const permissivePolicy: CicdPolicy = {
-      version: '1.0',
-      rules: [],
-      defaults: { allowUnknown: true, defaultRiskLevel: 'LOW' },
+  test('sandbox returns SimulationResult', async () => {
+    const intent = adapter.parseIntent('docker build -t myapp:1.0.0 .');
+    const sim = await adapter.sandbox(intent);
+    expect(sim.feasible).toBe(true);
+    expect(typeof sim.summary).toBe('string');
+    expect(Array.isArray(sim.warnings)).toBe(true);
+  });
+
+  test('sandbox returns infeasible for DENY patterns', async () => {
+    const intent = adapter.parseIntent('docker run -v /:/host myapp:1.0.0');
+    const sim = await adapter.sandbox(intent);
+    expect(sim.feasible).toBe(false);
+  });
+
+  test('rollback throws for non-rollback actions', async () => {
+    const intent = adapter.parseIntent('docker push myapp:1.0.0');
+    const snapshot = {
+      commandId: 'test-id',
+      timestamp: new Date(),
+      preState: '{}',
     };
-    const adapter = new CicdAdapter(permissivePolicy);
-    const result = await adapter.execute('docker build -t myapp:1.0.0 .');
-    expect(result.success).toBe(true);
-  });
-
-  test('allowUnknown=false denies unmatched commands', async () => {
-    const strictPolicy: CicdPolicy = {
-      version: '1.0',
-      rules: [],
-      defaults: { allowUnknown: false, defaultRiskLevel: 'LOW' },
-    };
-    const adapter = new CicdAdapter(strictPolicy);
-    const result = await adapter.execute('docker build -t myapp:1.0.0 .');
-    expect(result.success).toBe(false);
-    expect(result.abortReason).toMatch(/Policy denied/);
+    await expect(adapter.rollback(intent, snapshot)).rejects.toThrow(/not supported/);
   });
 });

@@ -51,7 +51,9 @@ export function evaluatePolicy(intent: ParsedIntent, policy: Policy): PolicyDeci
   let allowed = true;
   let requiresDryRun = false;
   let requiresApproval = false;
-  let currentRisk: RiskLevel = policy.defaults.defaultRiskLevel;
+  // Start at the lowest possible risk — each matching rule can only escalate it.
+  // defaultRiskLevel is applied below only when no rule matches at all.
+  let currentRisk: RiskLevel = 'LOW';
   const messages: string[] = [];
 
   for (const rule of policy.rules) {
@@ -80,6 +82,8 @@ export function evaluatePolicy(intent: ParsedIntent, policy: Policy): PolicyDeci
   }
 
   if (matchedRules.length === 0) {
+    // No rule matched — fall back to policy defaults
+    currentRisk = policy.defaults.defaultRiskLevel;
     if (!policy.defaults.allowUnknown) {
       allowed = false;
       messages.push('No matching rule found and allowUnknown is false');

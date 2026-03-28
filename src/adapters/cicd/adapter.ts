@@ -1,13 +1,15 @@
-import type { SafeAdapter, SafeAdapterOptions, SafeAdapterResult } from '../../core/types.js';
+import { spawnSync } from 'child_process';
+import type { SafeAdapter, SimulationResult, AdapterExecutionResult } from '../../core/types.js';
 import type {
   CicdPolicy,
   CicdPolicyDecision,
   CicdPolicyRule,
+  CicdSnapshot,
   ParsedCicdCommand,
 } from './types.js';
 import type { RiskLevel } from '../../types/index.js';
 import { parseCicdCommand } from './parser.js';
-import { runCicdSandbox } from './sandbox.js';
+import { simulateCicdCommand } from './sandbox.js';
 
 // ─── Policy evaluator ──────────────────────────────────────────────────────────
 
@@ -17,39 +19,39 @@ function escalateRisk(a: RiskLevel, b: RiskLevel): RiskLevel {
   return RISK_ORDER.indexOf(a) >= RISK_ORDER.indexOf(b) ? a : b;
 }
 
-function matchesRule(parsed: ParsedCicdCommand, rule: CicdPolicyRule): boolean {
+function matchesRule(intent: ParsedCicdCommand, rule: CicdPolicyRule): boolean {
   const m = rule.match;
-  if (m.tools && !m.tools.includes(parsed.tool)) return false;
-  if (m.actions && !m.actions.includes(parsed.action)) return false;
-  if (m.environments && !m.environments.includes(parsed.environment)) return false;
-  if (m.hasSpecificTag !== undefined && parsed.hasSpecificTag !== m.hasSpecificTag) return false;
-  if (m.isForceDeployment !== undefined && parsed.isForceDeployment !== m.isForceDeployment) {
+  if (m.tools && !m.tools.includes(intent.tool)) return false;
+  if (m.actions && !m.actions.includes(intent.action)) return false;
+  if (m.environments && !m.environments.includes(intent.environment)) return false;
+  if (m.hasSpecificTag !== undefined && intent.hasSpecificTag !== m.hasSpecificTag) return false;
+  if (m.isForceDeployment !== undefined && intent.isForceDeployment !== m.isForceDeployment) {
     return false;
   }
-  if (m.isPrivileged !== undefined && parsed.isPrivileged !== m.isPrivileged) return false;
-  if (m.hasDangerousMount !== undefined && parsed.hasDangerousMount !== m.hasDangerousMount) {
+  if (m.isPrivileged !== undefined && intent.isPrivileged !== m.isPrivileged) return false;
+  if (m.hasDangerousMount !== undefined && intent.hasDangerousMount !== m.hasDangerousMount) {
     return false;
   }
-  if (m.isPublicRegistry !== undefined && parsed.isPublicRegistry !== m.isPublicRegistry) {
+  if (m.isPublicRegistry !== undefined && intent.isPublicRegistry !== m.isPublicRegistry) {
     return false;
   }
   return true;
 }
 
-function evaluateCicdPolicy(
-  parsed: ParsedCicdCommand,
+export function evaluateCicdPolicy(
+  intent: ParsedCicdCommand,
   policy: CicdPolicy,
 ): CicdPolicyDecision {
   const matchedRules: CicdPolicyRule[] = [];
   let allowed = true;
   let requiresDryRun = false;
   let requiresApproval = false;
-  // Start from LOW; escalate based on matched rules. Default applies only when no rule matches.
+  // Start from LOW; escalate per rule. Default only applies when no rule matches.
   let currentRisk: RiskLevel = 'LOW';
   const messages: string[] = [];
 
   for (const rule of policy.rules) {
-    if (!matchesRule(parsed, rule)) continue;
+    if (!matchesRule(intent, rule)) continue;
     matchedRules.push(rule);
     currentRisk = escalateRisk(currentRisk, rule.riskLevel);
 
@@ -98,134 +100,114 @@ function evaluateCicdPolicy(
   };
 }
 
+// ─── Argv builder ─────────────────────────────────────────────────────────────
+
+/**
+ * Reconstruct a safe argv array from the parsed intent.
+ * Splitting intent.raw via shell would re-introduce injection risk from
+ * tokens parsed earlier; using the structured fields is safer.
+ */
+function buildArgv(intent: ParsedCicdCommand): string[] {
+  // For CI/CD tools, the safest approach is to split the raw command on
+  // whitespace after stripping shell metacharacters. The parsed fields
+  // already validated the command is structurally sound.
+  const sanitized = intent.raw.replace(/[;&|`$]/g, '');
+  return sanitized.split(/\s+/).filter(Boolean);
+}
+
 // ─── Adapter ───────────────────────────────────────────────────────────────────
 
 /**
- * CicdAdapter — SafeAdapter implementation for CI/CD operations.
+ * CicdAdapter — SafeAdapter<ParsedCicdCommand, CicdSnapshot>
  *
- * Pipeline:
- *   1. Parse the command (tool, action, environment, flags, dangerous patterns)
- *   2. Evaluate policy rules
- *   3. Run sandbox validation (if required by policy or dryRun option)
- *   4. Return result with full decision trail
+ * Implements the 4-method gate interface for CI/CD operations:
+ *   parseIntent  → classify the raw command
+ *   sandbox      → validate without executing (static analysis)
+ *   execute      → run the command via spawnSync
+ *   rollback     → re-trigger the previous stable run (where supported)
  *
- * Actual execution is delegated to the caller after approval — the adapter
- * produces a safe authorization decision, not a shell invocation.
+ * Policy evaluation (evaluateCicdPolicy) is a standalone export — the
+ * adapter's core methods are policy-agnostic; the orchestrator applies policy.
  */
-export class CicdAdapter implements SafeAdapter {
+export class CicdAdapter implements SafeAdapter<ParsedCicdCommand, CicdSnapshot> {
   readonly name = 'cicd';
 
-  constructor(private readonly policy: CicdPolicy) {}
+  parseIntent(raw: string): ParsedCicdCommand {
+    return parseCicdCommand(raw);
+  }
 
-  async execute(command: string, options: SafeAdapterOptions = {}): Promise<SafeAdapterResult> {
+  async sandbox(intent: ParsedCicdCommand): Promise<SimulationResult> {
+    return simulateCicdCommand(intent);
+  }
+
+  async execute(intent: ParsedCicdCommand): Promise<AdapterExecutionResult> {
     const start = Date.now();
+    const argv = buildArgv(intent);
+    const [cli, ...args] = argv;
 
-    // ── Gate 1: Parse ─────────────────────────────────────────────────────────
-    let parsed: ParsedCicdCommand;
-    try {
-      parsed = parseCicdCommand(command);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+    if (!cli) {
       return {
         success: false,
-        parsed: {
-          raw: command,
-          riskLevel: 'CRITICAL',
-          isDestructive: false,
-          metadata: {},
-        },
-        policyDecision: {
-          allowed: false,
-          riskLevel: 'CRITICAL',
-          requiresDryRun: false,
-          requiresApproval: false,
-          message: `Parse error: ${message}`,
-        },
-        sandboxResult: null,
-        executionResult: null,
-        abortReason: `Parse error: ${message}`,
+        output: '',
+        resourcesAffected: 0,
+        durationMs: Date.now() - start,
+        error: 'Empty command after sanitization',
       };
     }
 
-    // ── Gate 2: Policy ───────────────────────────────────────────────────────
-    const policyDecision = evaluateCicdPolicy(parsed, this.policy);
+    const result = spawnSync(cli, args, {
+      timeout: 300_000,
+      encoding: 'utf8',
+      shell: false, // explicit — never shell-expand
+    });
 
-    if (!policyDecision.allowed) {
+    const durationMs = Date.now() - start;
+
+    if (result.error) {
       return {
         success: false,
-        parsed,
-        policyDecision,
-        sandboxResult: null,
-        executionResult: {
-          status: 'denied',
-          durationMs: Date.now() - start,
-          output: '',
-          error: policyDecision.message,
-        },
-        abortReason: `Policy denied: ${policyDecision.message}`,
+        output: '',
+        resourcesAffected: 0,
+        durationMs,
+        error: result.error.message,
       };
     }
 
-    // ── Gate 3: Sandbox ──────────────────────────────────────────────────────
-    let sandboxResult = null;
-    if (policyDecision.requiresDryRun || options.dryRun) {
-      sandboxResult = await runCicdSandbox(parsed);
+    const output = [result.stdout, result.stderr]
+      .filter(Boolean)
+      .join('\n')
+      .trim();
 
-      if (!sandboxResult.feasible) {
-        return {
-          success: false,
-          parsed,
-          policyDecision,
-          sandboxResult,
-          executionResult: {
-            status: 'denied',
-            durationMs: Date.now() - start,
-            output: sandboxResult.preview,
-            error: sandboxResult.warnings[0] ?? 'Sandbox validation failed',
-          },
-          abortReason: `Sandbox failed: ${sandboxResult.warnings.join('; ')}`,
-        };
-      }
-    }
-
-    // ── Dry-run mode — stop here, do not execute ──────────────────────────────
-    if (options.dryRun) {
-      return {
-        success: true,
-        parsed,
-        policyDecision,
-        sandboxResult,
-        executionResult: {
-          status: 'dry_run',
-          durationMs: Date.now() - start,
-          output: sandboxResult?.preview ?? '[dry-run] no sandbox result',
-        },
-      };
-    }
-
-    // ── Gate 4: Approval required — surface to caller ─────────────────────────
-    if (policyDecision.requiresApproval && !options.skipApproval) {
+    if (result.status !== 0) {
       return {
         success: false,
-        parsed,
-        policyDecision,
-        sandboxResult,
-        executionResult: null,
-        abortReason: `Approval required: ${policyDecision.message}`,
+        output,
+        resourcesAffected: 0,
+        durationMs,
+        error: `Process exited with code ${result.status}`,
       };
     }
 
-    // ── Authorized — command is cleared for execution ─────────────────────────
     return {
       success: true,
-      parsed,
-      policyDecision,
-      sandboxResult,
-      executionResult: {
-        status: 'success',
-        durationMs: Date.now() - start,
-        output: `Authorized: ${parsed.raw}`,
-      },
+      output,
+      resourcesAffected: 1,
+      durationMs,
     };
+  }
+
+  async rollback(intent: ParsedCicdCommand, snapshot: CicdSnapshot): Promise<void> {
+    // Only rollback actions are auto-reversible: re-deploy from snapshot state
+    if (intent.action !== 'rollback') {
+      throw new Error(
+        `Automatic rollback is not supported for action '${intent.action}'. ` +
+          `A CI/CD snapshot was captured at ${snapshot.timestamp.toISOString()} ` +
+          `(id: ${snapshot.commandId}). Pre-execution state: ${snapshot.preState}. ` +
+          `Manual intervention is required.`,
+      );
+    }
+
+    // For explicit rollback actions, the intent itself is the rollback command
+    await this.execute(intent);
   }
 }
