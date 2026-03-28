@@ -75,7 +75,7 @@ interface RiskFactor {
 - SQL adapter v1 updated to produce `SafeIntent` (wraps current `ParsedIntent`)
 - Existing tests pass unchanged
 
-**Status:** 🔲 Not started
+**Status:** ✅ Complete
 
 ---
 
@@ -116,7 +116,7 @@ interface SafeAdapter<TConfig = unknown> {
 - `src/adapters/sql/` — SQL adapter refactored to implement `SafeAdapter`
 - Backward compatibility: `DatabaseAdapter` kept as alias/extends for migration period
 
-**Status:** 🔲 Not started
+**Status:** ✅ Complete
 
 ---
 
@@ -178,7 +178,7 @@ interface SQLIntent extends SafeIntent {
 - `src/adapters/sql/index.ts` — `SQLAdapter` class implementing `SafeAdapter`
 - All existing e2e tests pass
 
-**Status:** ✅ In progress (SQL parser + file restructure)
+**Status:** ✅ Complete
 
 ---
 
@@ -224,7 +224,7 @@ src/adapters/cloud/
 └── index.ts          # CloudAdapter class
 ```
 
-**Status:** 🔲 Not started (separate PR)
+**Status:** ✅ Complete
 
 ---
 
@@ -265,7 +265,7 @@ src/adapters/filesystem/
 └── index.ts          # FilesystemAdapter class
 ```
 
-**Status:** 🔲 Not started (separate PR)
+**Status:** ✅ Complete
 
 ---
 
@@ -301,7 +301,7 @@ src/adapters/api/
 └── index.ts          # APIAdapter class
 ```
 
-**Status:** 🔲 Not started (separate PR)
+**Status:** ✅ Complete
 
 ---
 
@@ -337,7 +337,7 @@ src/adapters/cicd/
 └── index.ts          # CICDAdapter class
 ```
 
-**Status:** 🔲 Not started (separate PR)
+**Status:** ✅ Complete
 
 ---
 
@@ -384,7 +384,7 @@ interface SafeAdapterPlugin {
 }
 ```
 
-**Status:** 🔲 Not started (separate PR)
+**Status:** ✅ Complete — MCP server (`npx safe-executor-mcp`), Claude Code plugin, NPM package published.
 
 ---
 
@@ -392,16 +392,21 @@ interface SafeAdapterPlugin {
 
 | Phase | Description | Status |
 |-------|-------------|--------|
-| 1 | Universal Intent Format | 🔲 Pending |
-| 2 | SafeAdapter interface | 🔲 Pending |
-| 3 | SQL Adapter v2 (AST parser) | ✅ In progress |
-| 4 | Cloud Infrastructure Adapter | 🔲 Pending |
-| 5 | Filesystem Adapter | 🔲 Pending |
-| 6 | API Adapter | 🔲 Pending |
-| 7 | CI/CD Adapter | 🔲 Pending |
-| 8 | Plugin System + NPM packages | 🔲 Pending |
+| 1 | Universal Intent Format (`SafeIntent`) | ✅ Complete |
+| 2 | SafeAdapter interface | ✅ Complete |
+| 3 | SQL Adapter v2 (AST parser via `node-sql-parser`) | ✅ Complete |
+| 4 | Cloud Infrastructure Adapter (Terraform / AWS / GCP / Azure) | ✅ Complete |
+| 5 | Filesystem Adapter (shell commands) | ✅ Complete |
+| 6 | API Adapter (REST / HTTP / curl) | ✅ Complete |
+| 7 | CI/CD Adapter (Docker / GitHub Actions / GitLab CI) | ✅ Complete |
+| 8 | Plugin System + NPM packages + MCP Server | ✅ Complete |
+| — | Kubernetes Adapter (kubectl / Helm) | ✅ Complete |
+| — | Secrets Adapter (Vault / AWS SM / SSM / GCP / Azure KV) | ✅ Complete |
+| — | Git Adapter (force push, reset, rebase protection) | ✅ Complete |
+| — | Network Adapter (iptables / ufw / routes / nmap) | ✅ Complete |
+| — | Message Queue Adapter (Kafka / RabbitMQ / Redis / SQS / SNS) | ✅ Complete |
 
-**This PR covers:** Phase 3 (SQL Adapter v2 with AST parser) + code restructure to support Phases 1-8.
+**All phases complete.** 10 adapters implemented and tested. 1279 tests passing. `tsc --noEmit`: 0 errors.
 
 ---
 

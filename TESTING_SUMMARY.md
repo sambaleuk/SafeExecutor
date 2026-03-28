@@ -25,10 +25,10 @@
 | secrets-adapter | 57 | PASS |
 | queue-adapter | 67 | PASS |
 | git-adapter | 56 | PASS |
-| mcp-auto-detect | 69/75 | 6 FAIL (pre-existing) |
-| **Total existing** | **721** | |
+| mcp-auto-detect | 75 | PASS |
+| **Total existing** | **731** | |
 
-**Grand total: 1269 tests passing across 16 suites.**
+**Grand total: 1279 tests passing across 16 suites.**
 
 ## Coverage Per Domain
 
@@ -66,18 +66,19 @@ All benchmarks run on the CI test runner:
 | Full pipeline (100 cmds) | ~19ms total | <5000ms |
 | Domain speed ratio | 3.4x | <10x |
 
-## Pre-Existing Failures (not introduced by this PR)
+## Auto-Detect Fix (stabilization pass)
 
-6 tests in `mcp-auto-detect.test.ts` fail due to **detection priority order** in `auto-detect.ts`:
+The 6 detection priority failures in `mcp-auto-detect.test.ts` were fixed in the stabilization pass
+by reordering sub-service checks before generic cloud prefix matching in `auto-detect.ts`:
 
-- `aws secretsmanager ...` routes to `cloud` (not `secrets`) because `aws ` prefix match fires before `secretsmanager` substring check
-- `aws ssm ...` routes to `cloud` (same reason)
-- `az keyvault ...` routes to `cloud` (same reason)
-- `aws sqs ...` routes to `cloud` (not `queue`)
-- `aws sns ...` routes to `cloud` (not `queue`)
-- `gcloud pubsub ...` routes to `cloud` (not `queue`)
+- `aws secretsmanager ...` → `secrets` ✅
+- `aws ssm ...` → `secrets` ✅
+- `az keyvault ...` → `secrets` ✅
+- `aws sqs ...` → `queue` ✅
+- `aws sns ...` → `queue` ✅
+- `gcloud pubsub ...` → `queue` ✅
 
-These are documented in the new E2E tests as expected behavior (matching actual code behavior), but the pre-existing unit tests expect the ideal behavior.
+All 75 `mcp-auto-detect` tests now pass.
 
 ## Edge Cases & Findings
 

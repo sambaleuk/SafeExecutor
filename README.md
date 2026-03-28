@@ -379,10 +379,9 @@ src/
 │   ├── git/                 # Git operations
 │   ├── network/             # iptables/ufw/routes
 │   └── queue/               # Kafka/RabbitMQ/Redis/SQS
-├── mcp/
+├── mcp-server/
 │   └── server.ts            # MCP server (safe_execute, safe_analyze, safe_policy_check)
-└── plugin/
-    └── claude-code/         # Claude Code plugin
+└── plugin/                  # Claude Code plugin (manifest.json + SKILL.md)
 ```
 
 ---

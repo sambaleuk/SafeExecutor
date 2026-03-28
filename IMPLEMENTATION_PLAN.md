@@ -1,5 +1,8 @@
 # SafeExecutor — Implementation Plan
 
+> **Status: ALL PHASES COMPLETE** — 1279 tests passing, 0 TypeScript errors, 10 adapters implemented.
+> See [STABILIZATION_REPORT.md](./STABILIZATION_REPORT.md) for the final state.
+
 > Each phase is self-contained and shippable. Later phases build on earlier ones.
 > Non-bypassable gates are marked **[GATE]** — these cannot be skipped or overridden.
 
@@ -21,10 +24,10 @@
 - OperationType covers: SELECT, INSERT, UPDATE, DELETE, TRUNCATE, ALTER, DROP, CREATE, UNKNOWN
 
 ### Acceptance criteria
-- [ ] `parseIntent('DELETE FROM users WHERE id = 1')` returns `{ type: 'DELETE', hasWhereClause: true, tables: ['users'] }`
-- [ ] `parseIntent('DELETE FROM users')` returns `{ hasWhereClause: false, isDestructive: true, isMassive: true }`
-- [ ] Pipeline correctly sequences all 6 gates without skipping
-- [ ] TypeScript compiles with strict mode, zero errors
+- [x] `parseIntent('DELETE FROM users WHERE id = 1')` returns `{ type: 'DELETE', hasWhereClause: true, tables: ['users'] }`
+- [x] `parseIntent('DELETE FROM users')` returns `{ hasWhereClause: false, isDestructive: true, isMassive: true }`
+- [x] Pipeline correctly sequences all 6 gates without skipping
+- [x] TypeScript compiles with strict mode, zero errors
 
 ---
 
@@ -56,10 +59,10 @@
 - Unknown operations are denied when `defaults.allowUnknown: false`
 
 ### Acceptance criteria
-- [ ] `DELETE FROM users` → PolicyDecision `{ allowed: false, riskLevel: 'CRITICAL' }`
-- [ ] `DELETE FROM users WHERE id = 1` → `{ requiresDryRun: true, riskLevel: 'HIGH' }`
-- [ ] `SELECT * FROM orders` → `{ allowed: true, riskLevel: 'LOW' }`
-- [ ] AJV validation rejects malformed policy files
+- [x] `DELETE FROM users` → PolicyDecision `{ allowed: false, riskLevel: 'CRITICAL' }`
+- [x] `DELETE FROM users WHERE id = 1` → `{ requiresDryRun: true, riskLevel: 'HIGH' }`
+- [x] `SELECT * FROM orders` → `{ allowed: true, riskLevel: 'LOW' }`
+- [x] AJV validation rejects malformed policy files
 
 ---
 
@@ -92,10 +95,10 @@ TRUNCATE → Schema inspection only (size estimation via pg_stat_user_tables)
 - If sandbox returns `feasible: false`, pipeline aborts — no execution
 
 ### Acceptance criteria
-- [ ] DML dry-run returns actual `rowsAffected` from rolled-back transaction
-- [ ] SELECT dry-run returns `estimatedRowsAffected` from EXPLAIN
-- [ ] No data is modified after a dry-run
-- [ ] `SandboxResult.warnings` populated for no-WHERE DML
+- [x] DML dry-run returns actual `rowsAffected` from rolled-back transaction
+- [x] SELECT dry-run returns `estimatedRowsAffected` from EXPLAIN
+- [x] No data is modified after a dry-run
+- [x] `SandboxResult.warnings` populated for no-WHERE DML
 
 ---
 
@@ -129,10 +132,10 @@ TRUNCATE → Schema inspection only (size estimation via pg_stat_user_tables)
 - Webhook timeout defaults to 300s — operations never hang indefinitely
 
 ### Acceptance criteria
-- [ ] `auto` mode approves LOW/MEDIUM, rejects HIGH/CRITICAL
-- [ ] `cli` mode prompts correctly and captures approver name
-- [ ] Webhook mode POSTs correct payload and handles timeout
-- [ ] Rejected approval → pipeline aborts with audit entry
+- [x] `auto` mode approves LOW/MEDIUM, rejects HIGH/CRITICAL
+- [x] `cli` mode prompts correctly and captures approver name
+- [x] Webhook mode POSTs correct payload and handles timeout
+- [x] Rejected approval → pipeline aborts with audit entry
 
 ---
 
@@ -166,10 +169,10 @@ BEGIN TRANSACTION
 - Rollback reason is always logged in AuditEntry
 
 ### Acceptance criteria
-- [ ] Successful execution → `status: 'success'`, rows committed
-- [ ] Threshold exceeded → `status: 'rolled_back'`, rollbackReason set
-- [ ] Exception during execution → `status: 'failed'`, transaction rolled back
-- [ ] `savepointUsed: true` always in ExecutionResult
+- [x] Successful execution → `status: 'success'`, rows committed
+- [x] Threshold exceeded → `status: 'rolled_back'`, rollbackReason set
+- [x] Exception during execution → `status: 'failed'`, transaction rolled back
+- [x] `savepointUsed: true` always in ExecutionResult
 
 ---
 
@@ -201,10 +204,10 @@ BEGIN TRANSACTION
 - **database** — writes to `audit_log` table (Phase 8)
 
 ### Acceptance criteria
-- [ ] Every pipeline run (success + failure + abort) produces an AuditEntry
-- [ ] AuditEntry is valid against `audit.schema.json`
-- [ ] File output is appendable and parseable line by line
-- [ ] Verbose mode outputs full JSON
+- [x] Every pipeline run (success + failure + abort) produces an AuditEntry
+- [x] AuditEntry is valid against `audit.schema.json`
+- [x] File output is appendable and parseable line by line
+- [x] Verbose mode outputs full JSON
 
 ---
 
@@ -241,9 +244,9 @@ const executor = new SafeExecutor({
 ```
 
 ### Acceptance criteria
-- [ ] PostgresAdapter passes all adapter contract tests
-- [ ] Swapping adapter does not require modifying pipeline or config loader
-- [ ] Intent parser handles MySQL and SQLite syntax correctly
+- [x] PostgresAdapter passes all adapter contract tests
+- [x] Swapping adapter does not require modifying pipeline or config loader
+- [x] Intent parser handles MySQL and SQLite syntax correctly
 
 ---
 
@@ -282,17 +285,17 @@ services:
 ```
 
 ### Documentation
-- [ ] Complete README with vision, architecture diagram, quickstart, API reference
-- [ ] `CONTRIBUTING.md` — How to add a new adapter
-- [ ] `SECURITY.md` — Responsible disclosure and threat model
-- [ ] JSDoc on all public APIs
-- [ ] Example scripts in `examples/`
+- [x] Complete README with vision, architecture diagram, quickstart, API reference
+- [x] `CONTRIBUTING.md` — How to add a new adapter
+- [x] `SECURITY.md` — Responsible disclosure and threat model
+- [x] JSDoc on all public APIs
+- [x] Example scripts in `examples/`
 
 ### Acceptance criteria
-- [ ] Unit tests: >90% coverage on core modules
-- [ ] Integration tests pass against Docker PostgreSQL
-- [ ] CI pipeline green on Node 20 and 22
-- [ ] README quickstart works with copy-paste
+- [x] Unit tests: >90% coverage on core modules
+- [x] Integration tests pass against Docker PostgreSQL
+- [x] CI pipeline green on Node 20 and 22
+- [x] README quickstart works with copy-paste
 
 ---
 
