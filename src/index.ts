@@ -114,3 +114,14 @@ export type {
   FsOperationCategory,
   PathRiskInfo,
 } from './adapters/filesystem/index.js';
+
+// ── Secret Manager Adapter ────────────────────────────────────────────────────
+export { SecretsAdapter } from './adapters/secrets/index.js';
+export type {
+  ParsedSecretCommand,
+  LeakDetectionResult,
+  SecretsAdapterOptions,
+  SecretTool,
+  SecretAction,
+  SecretEnvironment,
+} from './adapters/secrets/index.js';
