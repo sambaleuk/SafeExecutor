@@ -1,0 +1,246 @@
+{
+  "version": "1.0",
+  "domain": "filesystem",
+  "description": "Default safety policy for filesystem and shell operations",
+  "rules": [
+    {
+      "id": "deny-rm-rf-root",
+      "description": "rm -rf / or rm -rf ~ — non-bypassable, ever",
+      "match": {
+        "command": "rm",
+        "flagPattern": ["rf", "fr"],
+        "targetPattern": ["^/$", "^~$", "^/root$"]
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "nonBypassable": true,
+      "message": "rm -rf on root or home directory is permanently denied."
+    },
+    {
+      "id": "deny-rm-rf-glob",
+      "description": "rm -rf with glob expansion — blast radius unbound",
+      "match": {
+        "command": "rm",
+        "flagPattern": ["rf", "fr"],
+        "hasGlobs": true
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "nonBypassable": true,
+      "message": "rm -rf with glob expansion is not allowed — blast radius is unbounded."
+    },
+    {
+      "id": "deny-rm-rf-var-expansion",
+      "description": "rm -rf with variable expansion — empty var collapses to rm -rf /",
+      "match": {
+        "command": "rm",
+        "flagPattern": ["rf", "fr"],
+        "hasVarExpansion": true
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "nonBypassable": true,
+      "message": "rm -rf with unresolved variable — empty variable would collapse to rm -rf /."
+    },
+    {
+      "id": "deny-rm-no-path",
+      "description": "rm without an explicit path argument",
+      "match": {
+        "command": "rm",
+        "noTargets": true
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "nonBypassable": true,
+      "message": "rm requires an explicit path argument."
+    },
+    {
+      "id": "deny-rm-rf-system-paths",
+      "description": "rm -rf on known system paths",
+      "match": {
+        "command": "rm",
+        "flagPattern": ["rf", "fr"],
+        "targetPattern": ["^/etc", "^/usr", "^/var", "^/bin", "^/sbin", "^/lib", "^/boot", "^/proc", "^/sys", "^/dev"]
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "nonBypassable": true,
+      "message": "rm -rf on a system path is permanently denied."
+    },
+    {
+      "id": "deny-dd-block-device",
+      "description": "dd targeting a block device — will wipe disk",
+      "match": {
+        "command": "dd",
+        "targetPattern": ["^/dev/"]
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "nonBypassable": true,
+      "message": "dd to a block device is permanently denied."
+    },
+    {
+      "id": "deny-device-redirection",
+      "description": "Output redirection to /dev/* — direct disk write",
+      "match": {
+        "redirectionTarget": "^/dev/"
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "nonBypassable": true,
+      "message": "Output redirection to a device node is permanently denied."
+    },
+    {
+      "id": "deny-mv-dev-null",
+      "description": "mv to /dev/null — silent data destruction",
+      "match": {
+        "command": "mv",
+        "targetPattern": ["^/dev/null$"]
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "nonBypassable": true,
+      "message": "mv to /dev/null is permanently denied."
+    },
+    {
+      "id": "deny-mkfs-fdisk",
+      "description": "mkfs and fdisk — disk-level destructive operations",
+      "match": {
+        "command": ["mkfs", "fdisk"]
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "nonBypassable": true,
+      "message": "Disk formatting and partition operations are permanently denied."
+    },
+    {
+      "id": "deny-pipe-to-rm",
+      "description": "Pipe into bare rm — blast radius unknown without explicit filter",
+      "match": {
+        "pipeToCommand": "rm"
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "nonBypassable": true,
+      "message": "Piping into rm without explicit path filter is denied."
+    },
+    {
+      "id": "deny-chown-system-paths",
+      "description": "chown / chgrp on system paths — privilege escalation risk",
+      "match": {
+        "command": ["chown", "chgrp"],
+        "targetPattern": ["^/etc", "^/usr", "^/var", "^/bin", "^/sbin", "^/lib"]
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "nonBypassable": true,
+      "message": "chown/chgrp on system paths is permanently denied."
+    },
+    {
+      "id": "deny-chmod-r-system-paths",
+      "description": "chmod -R on system paths",
+      "match": {
+        "command": "chmod",
+        "flagPattern": ["R"],
+        "targetPattern": ["^/etc", "^/usr", "^/var", "^/bin", "^/sbin", "^/lib"]
+      },
+      "action": "deny",
+      "riskLevel": "CRITICAL",
+      "nonBypassable": true,
+      "message": "chmod -R on system paths is permanently denied."
+    },
+    {
+      "id": "approval-chmod-777",
+      "description": "chmod 777 — world-writable permissions",
+      "match": {
+        "command": "chmod",
+        "modePattern": "^0?777$"
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "chmod 777 makes files world-writable. Explicit approval required."
+    },
+    {
+      "id": "approval-chmod-r-large",
+      "description": "chmod -R affecting more than 100 files",
+      "match": {
+        "command": "chmod",
+        "flagPattern": ["R"],
+        "minFilesAffected": 100
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "chmod -R on >100 files requires explicit approval."
+    },
+    {
+      "id": "approval-chown-r-large",
+      "description": "chown / chgrp -R affecting more than 100 files",
+      "match": {
+        "command": ["chown", "chgrp"],
+        "flagPattern": ["R"],
+        "minFilesAffected": 100
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "chown/chgrp -R on >100 files requires explicit approval."
+    },
+    {
+      "id": "approval-find-delete",
+      "description": "find -delete or find -exec rm",
+      "match": {
+        "command": "find",
+        "hasDeleteFlag": true
+      },
+      "action": "require_approval",
+      "riskLevel": "HIGH",
+      "message": "find with deletion requires explicit approval."
+    },
+    {
+      "id": "approval-sudo-destructive",
+      "description": "Any destructive command run with sudo",
+      "match": {
+        "hasSudo": true,
+        "category": ["DESTROY", "MODIFY"]
+      },
+      "action": "require_approval",
+      "riskLevel": "CRITICAL",
+      "message": "Destructive commands with sudo require explicit approval."
+    },
+    {
+      "id": "dry-run-rm-rf",
+      "description": "rm -rf (non-denied) — dry-run first",
+      "match": {
+        "command": "rm",
+        "flagPattern": ["rf", "fr"]
+      },
+      "action": "require_dry_run",
+      "riskLevel": "HIGH",
+      "message": "rm -rf requires sandbox impact assessment before execution."
+    },
+    {
+      "id": "dry-run-rsync",
+      "description": "rsync — preview before sync",
+      "match": {
+        "command": "rsync"
+      },
+      "action": "require_dry_run",
+      "riskLevel": "MEDIUM",
+      "message": "rsync requires --dry-run preview before execution."
+    },
+    {
+      "id": "allow-read-commands",
+      "description": "Read-only commands always pass through",
+      "match": {
+        "category": ["READ"]
+      },
+      "action": "allow",
+      "riskLevel": "LOW",
+      "message": "Read-only operations are allowed."
+    }
+  ],
+  "defaults": {
+    "allowUnknown": false,
+    "defaultRiskLevel": "HIGH",
+    "defaultAction": "require_approval"
+  }
+}
