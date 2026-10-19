@@ -75,6 +75,10 @@
         "defaultRiskLevel": {
           "type": "string",
           "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+        },
+        "allowMultiStatement": {
+          "type": "boolean",
+          "description": "Whether to accept inputs with more than one statement. Defaults to false: such inputs are denied."
         }
       }
     }

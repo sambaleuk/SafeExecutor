@@ -1,4 +1,4 @@
-import type { SafeIntent, OperationType, RiskFactor, Target, Scope } from '../../types/index.js';
+import type { SafeIntent, OperationType, RiskFactor, RiskLevel, Target, Scope } from '../../types/index.js';
 
 /**
  * SQL Intent Parser — AST-based
@@ -10,10 +10,26 @@ import type { SafeIntent, OperationType, RiskFactor, Target, Scope } from '../..
  * Falls back to the regex parser when node-sql-parser throws (exotic syntax,
  * PL/pgSQL extensions, etc.) and flags intent.metadata.parserFallback = true
  * so the policy engine can escalate risk if desired.
+ *
+ * Every statement is evaluated. For multi-statement input the intent's type
+ * and WHERE flag come from the most dangerous statement, risk factors from
+ * all of them, and metadata.statementCount lets the policy engine refuse the
+ * batch (`SELECT 1; DROP TABLE users` must not pass as a SELECT).
  */
 
 const MASSIVE_ROW_THRESHOLD = 10_000;
 const DESTRUCTIVE_TYPES: OperationType[] = ['DELETE', 'TRUNCATE', 'DROP', 'ALTER'];
+const SEVERITY_ORDER: RiskLevel[] = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
+// Tie-breaker between statements of equal severity, least to most dangerous.
+// UNKNOWN ranks highest: nothing about an unclassified statement can be trusted.
+const TYPE_DANGER: OperationType[] = ['SELECT', 'CREATE', 'INSERT', 'UPDATE', 'ALTER', 'DELETE', 'TRUNCATE', 'DROP', 'UNKNOWN'];
+
+interface StatementAnalysis {
+  type: OperationType;
+  hasWhere: boolean;
+  isMassive: boolean;
+  riskFactors: RiskFactor[];
+}
 
 // ─── AST-based parsing ───────────────────────────────────────────────────────
 
@@ -42,20 +58,28 @@ async function parseWithAST(sql: string): Promise<SafeIntent> {
     throw new Error('Parser returned empty AST');
   }
 
-  const primary = statements[0];
+  const analyses = statements.map((stmt) =>
+    analyzeStatement(
+      mapASTTypeToOperation(stmt['type'] as string),
+      nodeHasWhereClause(stmt),
+      hasCTEClause(stmt),
+      detectSubqueries(stmt),
+    ),
+  );
+  const decisive = mostDangerous(analyses);
 
-  const type = mapASTTypeToOperation(primary['type'] as string);
+  const type = decisive.type;
+  const hasWhere = decisive.hasWhere;
   const tables = extractAllTables(statements as Record<string, unknown>[]);
-  const hasWhere = nodeHasWhereClause(primary);
-  const hasCTE = hasCTEClause(primary);
-  const hasSubquery = detectSubqueries(primary);
-  const hasJoin = detectJoins(primary);
+  const hasCTE = statements.some(hasCTEClause);
+  const hasSubquery = statements.some(detectSubqueries);
+  const hasJoin = statements.some(detectJoins);
   const isParameterized = sql.includes('$1') || sql.includes('?');
 
-  const isDestructive = DESTRUCTIVE_TYPES.includes(type);
-  const isMassive = isMassiveOperation(type, hasWhere);
+  const isDestructive = analyses.some((a) => DESTRUCTIVE_TYPES.includes(a.type));
+  const isMassive = analyses.some((a) => a.isMassive);
 
-  const riskFactors = buildRiskFactors(type, hasWhere, isMassive, hasCTE, hasSubquery);
+  const riskFactors = mergeRiskFactors(analyses);
 
   const target: Target = {
     name: tables[0] ?? 'unknown',
@@ -234,6 +258,48 @@ function detectJoins(node: Record<string, unknown>): boolean {
   });
 }
 
+// ─── Per-statement evaluation ────────────────────────────────────────────────
+
+function analyzeStatement(
+  type: OperationType,
+  hasWhere: boolean,
+  hasCTE: boolean,
+  hasSubquery: boolean,
+): StatementAnalysis {
+  const isMassive = isMassiveOperation(type, hasWhere);
+  return { type, hasWhere, isMassive, riskFactors: buildRiskFactors(type, hasWhere, isMassive, hasCTE, hasSubquery) };
+}
+
+function maxSeverityIndex(analysis: StatementAnalysis): number {
+  return Math.max(-1, ...analysis.riskFactors.map((f) => SEVERITY_ORDER.indexOf(f.severity)));
+}
+
+/** Highest risk-factor severity wins; equal severity falls back to TYPE_DANGER. */
+function mostDangerous(analyses: StatementAnalysis[]): StatementAnalysis {
+  return analyses.reduce((worst, a) => {
+    const diff = maxSeverityIndex(a) - maxSeverityIndex(worst);
+    if (diff !== 0) return diff > 0 ? a : worst;
+    return TYPE_DANGER.indexOf(a.type) > TYPE_DANGER.indexOf(worst.type) ? a : worst;
+  });
+}
+
+function mergeRiskFactors(analyses: StatementAnalysis[]): RiskFactor[] {
+  const byCode = new Map<string, RiskFactor>();
+  for (const factor of analyses.flatMap((a) => a.riskFactors)) {
+    if (!byCode.has(factor.code)) byCode.set(factor.code, factor);
+  }
+  const factors = [...byCode.values()];
+
+  if (analyses.length > 1) {
+    factors.push({
+      code: 'MULTI_STATEMENT',
+      severity: 'HIGH',
+      description: `${analyses.length} statements in one input — each statement must be submitted and evaluated on its own`,
+    });
+  }
+  return factors;
+}
+
 // ─── Risk factors ────────────────────────────────────────────────────────────
 
 function isMassiveOperation(type: OperationType, hasWhere: boolean): boolean {
@@ -326,12 +392,20 @@ function buildRiskFactors(
  * Sets metadata.parserFallback = true to allow policy escalation.
  */
 function parseWithRegex(sql: string, isFallback: boolean): SafeIntent {
-  const type = detectOperationTypeRegex(sql);
-  const tables = extractTablesRegex(sql, type);
-  const hasWhere = /\bWHERE\b/i.test(sql);
-  const isDestructive = DESTRUCTIVE_TYPES.includes(type);
-  const isMassive = isMassiveOperation(type, hasWhere);
-  const riskFactors = buildRiskFactors(type, hasWhere, isMassive, false, false);
+  const split = splitStatements(sql);
+  const statements = split.length > 0 ? split : [sql];
+  const types = statements.map(detectOperationTypeRegex);
+  const analyses = statements.map((stmt, i) =>
+    analyzeStatement(types[i] as OperationType, /\bWHERE\b/i.test(stmt), false, false),
+  );
+  const decisive = mostDangerous(analyses);
+
+  const type = decisive.type;
+  const hasWhere = decisive.hasWhere;
+  const tables = [...new Set(statements.flatMap((stmt, i) => extractTablesRegex(stmt, types[i] as OperationType)))];
+  const isDestructive = analyses.some((a) => DESTRUCTIVE_TYPES.includes(a.type));
+  const isMassive = analyses.some((a) => a.isMassive);
+  const riskFactors = mergeRiskFactors(analyses);
 
   const target: Target = {
     name: tables[0] ?? 'unknown',
@@ -356,8 +430,53 @@ function parseWithRegex(sql: string, isFallback: boolean): SafeIntent {
       parsedAt: new Date().toISOString(),
       parser: 'regex-fallback',
       parserFallback: isFallback,
+      statementCount: statements.length,
     },
   };
+}
+
+/**
+ * Splits SQL on top-level semicolons, skipping quoted strings, identifiers,
+ * dollar-quoted bodies ($$ ... $$, $tag$ ... $tag$) and comments.
+ */
+function splitStatements(sql: string): string[] {
+  const statements: string[] = [];
+  let current = '';
+  let i = 0;
+
+  while (i < sql.length) {
+    const ch = sql[i] as string;
+    const rest = sql.slice(i);
+    const dollarTag = /^\$[A-Za-z_]*\$/.exec(rest)?.[0];
+
+    if (ch === "'" || ch === '"') {
+      const close = sql.indexOf(ch, i + 1);
+      const end = close === -1 ? sql.length : close + 1;
+      current += sql.slice(i, end);
+      i = end;
+    } else if (dollarTag) {
+      const close = sql.indexOf(dollarTag, i + dollarTag.length);
+      const end = close === -1 ? sql.length : close + dollarTag.length;
+      current += sql.slice(i, end);
+      i = end;
+    } else if (rest.startsWith('--')) {
+      const newline = sql.indexOf('\n', i);
+      i = newline === -1 ? sql.length : newline;
+    } else if (rest.startsWith('/*')) {
+      const close = sql.indexOf('*/', i + 2);
+      i = close === -1 ? sql.length : close + 2;
+    } else if (ch === ';') {
+      statements.push(current);
+      current = '';
+      i++;
+    } else {
+      current += ch;
+      i++;
+    }
+  }
+  statements.push(current);
+
+  return statements.map((s) => s.trim()).filter(Boolean);
 }
 
 const REGEX_PATTERNS: Partial<Record<OperationType, RegExp>> = {
