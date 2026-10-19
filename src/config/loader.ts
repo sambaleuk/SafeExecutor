@@ -46,6 +46,25 @@ function loadJson<T>(filePath: string): T {
   return JSON.parse(fs.readFileSync(resolved, 'utf-8')) as T;
 }
 
+const ENV_REFERENCE = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
+
+/**
+ * Resolves a `${VAR}` reference from process.env so credentials never have to
+ * live in a config file. Literal values are returned unchanged; a reference to
+ * an unset variable fails hard rather than connecting with an empty string.
+ */
+function resolveEnvReference(value: string, field: string): string {
+  const match = ENV_REFERENCE.exec(value);
+  if (!match) return value;
+
+  const name = match[1] as string;
+  const resolved = process.env[name];
+  if (!resolved) {
+    throw new Error(`Config field ${field} references environment variable ${name}, which is not set`);
+  }
+  return resolved;
+}
+
 export function loadConfig(configPath: string): SafeExecutorConfig {
   const config = loadJson<SafeExecutorConfig>(configPath);
 
@@ -55,7 +74,13 @@ export function loadConfig(configPath: string): SafeExecutorConfig {
     throw new Error(`Invalid config at ${configPath}:\n${errors}`);
   }
 
-  return config;
+  return {
+    ...config,
+    database: {
+      ...config.database,
+      connectionString: resolveEnvReference(config.database.connectionString, 'database.connectionString'),
+    },
+  };
 }
 
 export function loadPolicy(policyPath: string): Policy {

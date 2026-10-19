@@ -4,7 +4,7 @@
   "executor": "migration-bot",
   "database": {
     "adapter": "postgres",
-    "connectionString": "postgresql://user:password@localhost:5432/mydb",
+    "connectionString": "${SAFE_EXECUTOR_DATABASE_URL}",
     "schema": "public",
     "allowedTables": ["users", "orders", "products", "sessions"],
     "blockedTables": ["audit_log", "payment_methods"],

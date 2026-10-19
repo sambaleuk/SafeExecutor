@@ -8,3 +8,8 @@ logs/
 *.js.map
 coverage/
 .DS_Store
+
+# Local-only configs that hold real connection strings — never commit them.
+# Use a ${SAFE_EXECUTOR_DATABASE_URL} reference in tracked configs instead.
+config/neubooks-*.json
+config/*.local.json
