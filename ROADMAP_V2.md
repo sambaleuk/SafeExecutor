@@ -384,7 +384,7 @@ interface SafeAdapterPlugin {
 }
 ```
 
-**Status:** ✅ Complete — MCP server (`npx safe-executor-mcp`), Claude Code plugin, NPM package published.
+**Status:** MCP server (`node dist/bin/safe-executor-mcp.js`) and Claude Code plugin (MCP config + SKILL.md, advisory) done. NPM package not published yet.
 
 ---
 
