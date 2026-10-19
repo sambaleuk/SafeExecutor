@@ -1,23 +1,51 @@
 /**
  * MCP Tool handlers for SafeExecutor.
  * These tools parse + classify commands but do NOT execute them.
+ *
+ * Fail-closed: a command is only ALLOWED when every simple command it would
+ * run was recognized by a domain parser and classified below HIGH. Unknown
+ * commands, parser errors and unanalyzable shell constructs are BLOCKED.
  */
 
 import { detectDomain } from './auto-detect.js';
+import { extractSegments } from './command-segments.js';
+import type { CommandSegment } from './command-segments.js';
 import type { RiskLevel, RiskFactor } from '../types/index.js';
+
+interface Analysis {
+  domain: string;
+  operation: string;
+  targets: string[];
+  riskLevel: RiskLevel;
+  blocked: boolean;
+  reason: string | null;
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+const RISK_ORDER: RiskLevel[] = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
+
 function maxRisk(factors: RiskFactor[]): RiskLevel {
-  const order: RiskLevel[] = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
   return factors.reduce<RiskLevel>((max, f) => {
-    return order.indexOf(f.severity) > order.indexOf(max) ? f.severity : max;
+    return RISK_ORDER.indexOf(f.severity) > RISK_ORDER.indexOf(max) ? f.severity : max;
   }, 'LOW');
+}
+
+function blockedAnalysis(domain: string, reason: string): Analysis {
+  return { domain, operation: 'unknown', targets: [], riskLevel: 'HIGH', blocked: true, reason };
+}
+
+/** Blocked beats allowed, then higher risk wins; ties keep the earlier entry. */
+function riskiest(analyses: Analysis[]): Analysis {
+  return analyses.reduce((worst, a) => {
+    if (a.blocked !== worst.blocked) return a.blocked ? a : worst;
+    return RISK_ORDER.indexOf(a.riskLevel) > RISK_ORDER.indexOf(worst.riskLevel) ? a : worst;
+  });
 }
 
 // ─── Lazy parser imports ─────────────────────────────────────────────────────
 
-async function parseWithDomain(command: string, domain: string) {
+async function parseWithDomain(command: string, domain: string): Promise<Analysis> {
   switch (domain) {
     case 'sql': {
       const { parseIntent } = await import('../adapters/sql/parser.js');
@@ -141,22 +169,57 @@ async function parseWithDomain(command: string, domain: string) {
       };
     }
     default:
-      return {
-        domain,
-        operation: 'unknown' as const,
-        targets: [] as string[],
-        riskLevel: 'unknown' as RiskLevel,
-        blocked: false,
-        reason: 'No parser available for this domain' as string | null,
-      };
+      return blockedAnalysis(domain, 'No parser available for this domain: blocked by default (fail-closed)');
   }
+}
+
+async function analyzeWithDomain(command: string, domain: string): Promise<Analysis> {
+  try {
+    return await parseWithDomain(command, domain);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return blockedAnalysis(domain, `The ${domain} parser could not analyze this command: ${message}`);
+  }
+}
+
+/**
+ * The auto-detected domain is always evaluated. A caller-supplied domain is
+ * evaluated in addition, so it can add scrutiny but never lower the verdict.
+ */
+async function analyzeSegment(segment: CommandSegment, domainOverride?: string): Promise<Analysis> {
+  if (segment.blockedReason) return blockedAnalysis('unknown', segment.blockedReason);
+
+  const detected = segment.domain ?? detectDomain(segment.command);
+  const domains = domainOverride && domainOverride !== detected ? [domainOverride, detected] : [detected];
+  return riskiest(await Promise.all(domains.map((d) => analyzeWithDomain(segment.command, d))));
+}
+
+async function analyzeCommand(command: string, domainOverride?: string) {
+  // SQL text is not a shell command line: `||` is string concatenation and
+  // `;` separates statements, which the SQL parser evaluates itself.
+  const segments: CommandSegment[] =
+    detectDomain(command) === 'sql'
+      ? [{ command: command.trim(), domain: 'sql' }]
+      : extractSegments(command ?? '');
+
+  if (segments.length === 0) {
+    return { ...blockedAnalysis('unknown', 'Empty command'), segments: [] };
+  }
+
+  const analyses = await Promise.all(segments.map((s) => analyzeSegment(s, domainOverride)));
+  return {
+    ...riskiest(analyses),
+    segments: segments.map((s, i) => {
+      const { domain, riskLevel, blocked } = analyses[i] as Analysis;
+      return { command: s.command, domain, riskLevel, blocked };
+    }),
+  };
 }
 
 // ─── Tool Handlers ───────────────────────────────────────────────────────────
 
 export async function safeExecute(command: string, domain?: string) {
-  const resolvedDomain = domain ?? detectDomain(command);
-  const result = await parseWithDomain(command, resolvedDomain);
+  const result = await analyzeCommand(command, domain);
   return {
     ...result,
     policy_decision: result.blocked ? 'BLOCKED' : 'ALLOWED',
@@ -164,8 +227,7 @@ export async function safeExecute(command: string, domain?: string) {
 }
 
 export async function safeAnalyze(command: string, domain?: string) {
-  const resolvedDomain = domain ?? detectDomain(command);
-  const result = await parseWithDomain(command, resolvedDomain);
+  const result = await analyzeCommand(command, domain);
   return {
     ...result,
     policy_decision: result.blocked ? 'BLOCKED' : 'ALLOWED',
@@ -174,12 +236,11 @@ export async function safeAnalyze(command: string, domain?: string) {
 }
 
 export async function safePolicyCheck(command: string) {
-  const domain = detectDomain(command);
-  const result = await parseWithDomain(command, domain);
+  const result = await analyzeCommand(command);
   return {
     allowed: !result.blocked,
     risk: result.riskLevel,
-    domain,
+    domain: result.domain,
     reason: result.reason ?? (result.blocked ? 'High-risk operation blocked by policy' : 'Operation is within safe thresholds'),
   };
 }

@@ -652,7 +652,7 @@ describe('safePolicyCheck', () => {
     test('unknown domain has reason about no parser', async () => {
       const result = await safePolicyCheck('echo hello');
       expect(result.domain).toBe('unknown');
-      expect(result.reason).toBe('No parser available for this domain');
+      expect(result.reason).toMatch(/^No parser available for this domain/);
     });
   });
 });
@@ -746,17 +746,17 @@ describe('Unknown domain handling', () => {
     expect(result.domain).toBe('unknown');
     expect(result.operation).toBe('unknown');
     expect(result.targets).toEqual([]);
-    expect(result.riskLevel).toBe('unknown');
-    expect(result.blocked).toBe(false);
-    expect(result.reason).toBe('No parser available for this domain');
-    expect(result.policy_decision).toBe('ALLOWED');
+    expect(result.riskLevel).toBe('HIGH');
+    expect(result.blocked).toBe(true);
+    expect(result.reason).toMatch(/^No parser available for this domain/);
+    expect(result.policy_decision).toBe('BLOCKED');
   });
 
   test('whoami -> domain=unknown', async () => {
     const result = await safeExecute('whoami');
     expect(result.domain).toBe('unknown');
     expect(result.operation).toBe('unknown');
-    expect(result.policy_decision).toBe('ALLOWED');
+    expect(result.policy_decision).toBe('BLOCKED');
   });
 
   test('ls -la /tmp -> domain=unknown (ls not in detectDomain patterns)', async () => {
@@ -780,15 +780,15 @@ describe('Unknown domain handling', () => {
     const result = await safeExecute('');
     expect(result.domain).toBe('unknown');
     expect(result.operation).toBe('unknown');
-    expect(result.blocked).toBe(false);
+    expect(result.blocked).toBe(true);
   });
 
   test('safePolicyCheck with unknown command', async () => {
     const result = await safePolicyCheck('echo test');
     expect(result.domain).toBe('unknown');
-    expect(result.allowed).toBe(true);
-    expect(result.risk).toBe('unknown');
-    expect(result.reason).toBe('No parser available for this domain');
+    expect(result.allowed).toBe(false);
+    expect(result.risk).toBe('HIGH');
+    expect(result.reason).toMatch(/^No parser available for this domain/);
   });
 
   test('safeAnalyze with unknown command', async () => {
@@ -937,25 +937,28 @@ describe('Domain override via explicit domain parameter', () => {
     expect(result.domain).toBe('filesystem');
   });
 
-  test('filesystem command can be forced to unknown domain', async () => {
+  test('forcing a filesystem command to unknown domain still blocks it', async () => {
     const result = await safeExecute('rm -rf /tmp', 'unknown');
-    expect(result.domain).toBe('unknown');
-    expect(result.operation).toBe('unknown');
+    // Both analyses block; the auto-detected filesystem one is the riskier.
+    expect(result.domain).toBe('filesystem');
+    expect(result.blocked).toBe(true);
   });
 
-  test('unknown command can be forced to SQL domain', async () => {
-    // This will likely throw in the SQL parser because 'echo hello' is not valid SQL
-    // The parser has a regex fallback, so it may still return a result
+  test('forcing an unknown command to SQL domain does not unblock it', async () => {
+    // The SQL regex fallback would call 'echo hello' LOW; the command is
+    // still unrecognized as a whole, so it stays blocked.
     const result = await safeExecute('echo hello', 'sql');
-    expect(result.domain).toBe('sql');
+    expect(result.domain).toBe('unknown');
+    expect(result.blocked).toBe(true);
   });
 
   test('safeAnalyze respects domain override', async () => {
-    // Forcing a filesystem command into the cloud parser throws because
-    // 'rm' is not a supported cloud CLI. This verifies the override is applied.
-    await expect(safeAnalyze('rm -rf /', 'cloud')).rejects.toThrow(
-      /Unsupported cloud CLI/,
-    );
+    // Forcing a filesystem command into the cloud parser makes it throw
+    // ('rm' is not a supported cloud CLI). The override is applied, and the
+    // parser error is reported as a block rather than a thrown error.
+    const result = await safeAnalyze('rm -rf /', 'cloud');
+    expect(result.blocked).toBe(true);
+    expect(result.segments).toHaveLength(1);
   });
 
   test('safeAnalyze domain override with compatible command', async () => {
@@ -1024,7 +1027,7 @@ describe('Reason field behavior across domains', () => {
 
   test('Unknown: reason explains no parser is available', async () => {
     const result = await safeExecute('echo hello');
-    expect(result.reason).toBe('No parser available for this domain');
+    expect(result.reason).toMatch(/^No parser available for this domain/);
   });
 });
 
