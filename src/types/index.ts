@@ -125,6 +125,11 @@ export interface Policy {
   defaults: {
     allowUnknown: boolean;
     defaultRiskLevel: RiskLevel;
+    /**
+     * Allow inputs that carry several statements (intent.metadata.statementCount > 1).
+     * Off by default: a batch would otherwise be judged by a single statement.
+     */
+    allowMultiStatement?: boolean;
   };
 }
 

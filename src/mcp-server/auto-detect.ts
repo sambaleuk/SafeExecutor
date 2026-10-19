@@ -1,5 +1,9 @@
 /**
  * Auto-detect the domain of a command based on its patterns.
+ *
+ * Only looks at the start of the string, so it expects a simple command:
+ * callers split chains and strip wrappers first (see command-segments.ts).
+ * Anything unrecognized is 'unknown', which the MCP tools treat as BLOCKED.
  */
 
 const SQL_KEYWORDS = /^(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE)\s/i;

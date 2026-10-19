@@ -25,7 +25,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'safe_execute',
       description:
-        'Parse a command, classify its risk, and apply SafeExecutor policy. Returns domain, riskLevel, operation, targets, policy_decision, and blocked status. Does NOT execute the command.',
+        'Parse a command, classify its risk, and return a BLOCKED/ALLOWED verdict. Shell chains and wrappers (&&, ;, |, sudo, env, bash -c, psql -c) are split and every segment is evaluated; the worst one decides. Fail-closed: unrecognized commands are BLOCKED. Returns domain, riskLevel, operation, targets, segments, policy_decision, and blocked status. Does NOT execute the command.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -36,7 +36,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           domain: {
             type: 'string',
             enum: ['sql', 'git', 'kubernetes', 'cloud', 'cicd', 'secrets', 'network', 'queue', 'api', 'filesystem'],
-            description: 'Optional domain override. Auto-detected if omitted.',
+            description:
+              'Optional extra domain parser. The auto-detected domain is always evaluated too, so an override can only add scrutiny, never lower the verdict.',
           },
         },
         required: ['command'],
@@ -56,7 +57,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           domain: {
             type: 'string',
             enum: ['sql', 'git', 'kubernetes', 'cloud', 'cicd', 'secrets', 'network', 'queue', 'api', 'filesystem'],
-            description: 'Optional domain override. Auto-detected if omitted.',
+            description:
+              'Optional extra domain parser. The auto-detected domain is always evaluated too, so an override can only add scrutiny, never lower the verdict.',
           },
         },
         required: ['command'],

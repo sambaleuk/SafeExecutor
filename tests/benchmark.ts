@@ -11,7 +11,7 @@
  * Usage:
  *   npm run build
  *   npx tsc -p tsconfig.benchmark.json
- *   node dist-benchmark/tests/benchmark.js
+ *   SAFE_EXECUTOR_DATABASE_URL=postgresql://... node dist-benchmark/tests/benchmark.js
  *
  * Generates: BENCHMARK_REPORT.md
  *
@@ -54,8 +54,12 @@ import type {
 
 const RUNS = 15; // runs per test (min 10 per spec)
 const ZERO_UUID = '00000000-0000-0000-0000-000000000000';
-const CONNECTION_STRING =
-  'postgresql://postgres:FAanl100921%21@db.oslhwchaxstnloixpgxc.supabase.co:6543/postgres';
+// Credentials come from the environment — a connection string is never committed.
+const CONNECTION_STRING = process.env['SAFE_EXECUTOR_DATABASE_URL'] ?? '';
+if (!CONNECTION_STRING) {
+  console.error('SAFE_EXECUTOR_DATABASE_URL is not set. Export the target database URL before running the benchmark.');
+  process.exit(1);
+}
 const REPORT_PATH = './BENCHMARK_REPORT.md';
 
 // ─── Config (constructed directly — avoids schema path resolution in dist-benchmark) ─
@@ -686,7 +690,7 @@ function getEnvInfo(): EnvInfo {
     cpus: cpuList.length,
     cpuModel: cpuList[0]?.model ?? 'unknown',
     totalMemGb: os.totalmem() / 1024 ** 3,
-    pgHost: 'db.oslhwchaxstnloixpgxc.supabase.co:6543 (Supabase/PostgreSQL)',
+    pgHost: 'remote Supabase/PostgreSQL (host redacted, from SAFE_EXECUTOR_DATABASE_URL)',
     runsPer: RUNS,
   };
 }

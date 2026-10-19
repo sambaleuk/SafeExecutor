@@ -92,6 +92,17 @@ export function evaluatePolicy(intent: ParsedIntent, policy: Policy): PolicyDeci
     }
   }
 
+  // One call, one statement: a batch would otherwise be judged by whichever
+  // statement the rules matched, and executed as a whole. Opt-in only.
+  const statementCount = Number(intent.metadata?.['statementCount'] ?? 1);
+  if (statementCount > 1 && !policy.defaults.allowMultiStatement) {
+    allowed = false;
+    currentRisk = escalateRisk(currentRisk, 'HIGH');
+    messages.push(
+      `Input contains ${statementCount} statements; submit one statement per call (policy.defaults.allowMultiStatement is false)`,
+    );
+  }
+
   // CRITICAL operations always require dry-run + approval
   if (currentRisk === 'CRITICAL') {
     requiresDryRun = true;

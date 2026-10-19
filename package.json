@@ -6,20 +6,22 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "safe-executor-mcp": "./dist/bin/safe-executor-mcp.js"
+    "safe-executor-mcp": "./dist/bin/safe-executor-mcp.js",
+    "safe-executor-hook": "./dist/bin/safe-executor-hook.js"
   },
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     },
     "./mcp-server": {
-      "import": "./dist/src/mcp-server/index.js",
-      "types": "./dist/src/mcp-server/index.d.ts"
+      "types": "./dist/mcp-server/index.d.ts",
+      "import": "./dist/mcp-server/index.js"
     }
   },
   "files": [
     "dist/",
+    "schemas/",
     "plugin/",
     "config/",
     "README.md"

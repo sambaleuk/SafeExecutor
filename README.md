@@ -1,422 +1,240 @@
 # SafeExecutor
 
-![Tests](https://img.shields.io/badge/tests-1279%20passing-brightgreen)
-![Adapters](https://img.shields.io/badge/adapters-10-blue)
-![Policy Rules](https://img.shields.io/badge/policy%20rules-~100-orange)
-![Overhead](https://img.shields.io/badge/overhead-0.30ms-green)
-![Throughput](https://img.shields.io/badge/throughput-7273%20req%2Fs-blue)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**A universal safe execution framework for autonomous AI agents.**
+**A gate-enforced execution layer for operations an AI agent wants to run on sensitive systems.**
 
-SafeExecutor intercepts and evaluates **any** operation before execution — SQL queries, shell commands, cloud infrastructure changes, Kubernetes operations, API calls, CI/CD deployments, secret access, git operations, network configuration, and message queue operations. Every action passes through a 6-gate pipeline before it runs.
+An agent proposes an operation; SafeExecutor parses it, checks it against a policy, dry-runs it when the policy asks for it, routes it for approval, executes it with rollback protection, and writes an audit entry, or refuses with a reason at the first gate that fails.
 
+> Status: v0.1.0, **not published on npm** — install from source. The SQL/PostgreSQL path is the most complete and the only one exercised end-to-end against a live database (Supabase Postgres, see [TESTING_REPORT.md](TESTING_REPORT.md)). Other domains are covered by unit tests.
+>
 > Inspired by [Modragor](https://github.com/sambaleuk/Modragor), a model-driven agent orchestrator.
 
 ---
 
-## Why SafeExecutor
+## Two entry points
 
-AI agents are increasingly capable of taking real-world actions: running SQL, calling APIs, managing infrastructure, pushing code. A single wrong command can drop a production table, flush a Redis cache, or force-push over main. SafeExecutor puts a policy-enforced safety layer between the agent and the world.
-
-```
-Agent intent  →  SafeExecutor  →  Safe execution (or rejection with reason)
-```
-
-Tested in production against **NeuBooks** (PostgreSQL/Supabase). Benchmarked at **0.30ms** business logic overhead and **7273 req/s** for blocking dangerous commands.
+| | Library pipeline (`SafeExecutor`) | MCP server (`safe-executor-mcp`) |
+|---|---|---|
+| What it does | Runs the 6 gates, **executes** the operation if every gate passes | **Classifies** a command and returns `BLOCKED` / `ALLOWED`; never executes |
+| Domains | SQL/PostgreSQL built in; any `SafeAdapter` via `options.adapter` | sql, filesystem, git, kubernetes, cloud, cicd, api, secrets, network, queue |
+| Decision source | JSON policy (`config/default-policy.json`) | Per-domain parsers and risk factors, fail-closed |
 
 ---
 
-## Pipeline
-
-Every operation passes through 6 gates:
+## Library pipeline
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                     SafeExecutor Pipeline                           │
-│                                                                     │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────────────┐   │
-│  │ 1. Intent    │──▶│ 2. Policy    │──▶│ 3. Sandbox / Dry-Run │   │
-│  │    Parser    │   │    Engine    │   │                      │   │
-│  └──────────────┘   └──────────────┘   └──────────────────────┘   │
-│                                                  │                  │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────────────┐   │
-│  │ 6. Audit     │◀──│ 5. Execution │◀──│ 4. Approval Gate     │   │
-│  │    Trail     │   │  + Rollback  │   │                      │   │
-│  └──────────────┘   └──────────────┘   └──────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────┘
+raw operation
+  → 1. Intent parser     adapter.parseIntent()  → SafeIntent (type, tables, WHERE, risk factors, statement count)
+  → 2. Policy engine     JSON rules             → allow / deny / require_dry_run / require_approval
+  → 3. Sandbox           adapter.sandbox()      → dry-run, only when the policy requires it
+  → 4. Approval gate     auto / cli / webhook   → only when the policy requires it
+  → 5. Executor          adapter.execute()      → transaction + savepoint, rollback on threshold breach
+  → 6. Audit trail       JSON entry (console or file), written for completed and aborted runs
 ```
 
-| Gate | What it does |
+| Gate | Behavior (SQL adapter) |
 |---|---|
-| **Intent Parser** | Parses the raw operation into a structured intent (type, target, risk level) |
-| **Policy Engine** | Evaluates ~100 rules across all domains — blocks, warns, or allows |
-| **Sandbox / Dry-Run** | Simulates the operation without side effects when possible |
-| **Approval Gate** | Routes high-risk operations to a human approval queue |
-| **Execution + Rollback** | Executes with rollback hooks for reversible operations |
-| **Audit Trail** | Logs every decision with full context for compliance |
+| Intent parser | AST via `node-sql-parser` (PostgreSQL dialect), regex fallback for syntax it cannot parse. **Every statement** is evaluated; the most dangerous one drives the intent. |
+| Policy engine | Rules match on operation type, WHERE presence, table name patterns and estimated rows. No match → `defaults.allowUnknown` (false in the default policy). More than one statement → denied unless `defaults.allowMultiStatement` is true. |
+| Sandbox | DML runs inside `BEGIN … ROLLBACK` to count affected rows; `ALTER`/`CREATE` use `EXPLAIN`; `DROP`/`TRUNCATE` cannot be dry-run and go straight to approval. |
+| Approval | `auto` approves LOW/MEDIUM and rejects HIGH/CRITICAL; `cli` prompts in the terminal; `webhook` posts and polls. |
+| Executor | Runs in a transaction with a savepoint; rolls back if rows affected exceed 1.5× the dry-run estimate or `database.maxRowsThreshold`. |
+| Audit | One JSON record per run with intent, policy decision, sandbox, approval and execution results. |
 
----
-
-## 10 Adapters
-
-### 1. SQL
-AST-based parser using `node-sql-parser`. Understands query structure, not just patterns.
-
-| Blocks | Allows |
-|---|---|
-| `DELETE` without `WHERE` | `DELETE FROM orders WHERE id = 42` |
-| `DROP TABLE` | `SELECT *` with row limits |
-| `TRUNCATE` | `INSERT` with validated columns |
-
-### 2. Cloud (Terraform / AWS / GCP / Azure)
-
-| Blocks | Allows |
-|---|---|
-| `terraform destroy` without `-target` | Scoped infrastructure changes |
-| VPC deletion | Read-only describe/list operations |
-| IAM policy modifications | Tagged resource creation |
-
-### 3. Kubernetes
-
-| Blocks | Allows |
-|---|---|
-| `delete namespace` | Operations on non-prod namespaces |
-| Scale to 0 replicas in prod | Dry-run applies |
-| `kubectl exec` in prod | `kubectl get` / `kubectl describe` |
-
-### 4. Filesystem
-Shell command analysis for destructive patterns.
-
-| Blocks | Allows |
-|---|---|
-| `rm -rf /` | Scoped file operations |
-| `chmod 777` | Permission changes on non-critical paths |
-| `dd` to block devices | Safe data operations |
-
-### 5. CI/CD (Docker / GitHub Actions)
-
-| Blocks | Allows |
-|---|---|
-| `docker run --privileged` | Standard container runs |
-| Mount root filesystem | Scoped volume mounts |
-| Deploy to prod without image tag | Tagged, reviewed deployments |
-
-### 6. API / HTTP
-
-| Blocks | Allows |
-|---|---|
-| Credentials in URL | Authenticated requests via headers |
-| Bulk DELETE operations | Standard CRUD with pagination |
-| Sensitive data in request bodies | Validated payloads |
-
-### 7. Secrets (Vault / AWS SM / SSM / GCP / Azure KV)
-
-| Blocks | Allows |
-|---|---|
-| Plaintext secrets in operations | Vault path references |
-| Export all secrets | Scoped, per-secret reads |
-| `kubectl get secret -o yaml` | Managed secret injection |
-
-### 8. Git
-
-| Blocks | Allows |
-|---|---|
-| `git push --force` to main | Force push to feature branches |
-| `git reset --hard` | Safe resets on local branches |
-| `filter-branch` on shared refs | Local history rewriting |
-
-### 9. Network (iptables / ufw / routes)
-
-| Blocks | Allows |
-|---|---|
-| Flush all firewall rules | Scoped rule additions |
-| `ufw disable` | Status checks |
-| Remove default gateway | Non-critical route changes |
-
-### 10. Message Queue (Kafka / RabbitMQ / Redis / SQS)
-
-| Blocks | Allows |
-|---|---|
-| Purge queue in prod | Consume with explicit offset |
-| `FLUSHALL` (Redis) | Scoped key deletions |
-| Delete topic with active consumers | Pause/throttle operations |
-
----
-
-## Installation
-
-### Option 1 — Claude Code Plugin
-
-Copy the plugin directory into your Claude Code configuration:
+### Usage
 
 ```bash
-cp -r plugin/ ~/.claude/plugins/safe-executor
+git clone https://github.com/sambaleuk/SafeExecutor.git
+cd SafeExecutor
+npm ci
+npm run build
+npm test            # Jest suite, no database required
 ```
 
-The plugin adds SafeExecutor as a pre-execution hook for all tool calls inside Claude Code.
+From another project: `npm install /path/to/SafeExecutor`, then:
 
-### Option 2 — MCP Server
+```typescript
+import { SafeExecutor } from 'safe-executor';
 
-Run as an MCP server that exposes 3 tools to any MCP-compatible client:
+// config/example-config.json holds "${SAFE_EXECUTOR_DATABASE_URL}" instead of a
+// connection string; loadConfig resolves it from the environment and fails if unset.
+const executor = new SafeExecutor({ configPath: './config/example-config.json' });
+
+const result = await executor.run('DELETE FROM users');
+// result.success     === false
+// result.abortReason === 'Policy denied: DELETE without WHERE clause is not allowed. ...'
+
+await executor.close();
+```
+
+`run()` pings the database before the pipeline starts, so a reachable PostgreSQL is required even for operations that will be refused.
+
+Outcomes with `config/default-policy.json` and `approval.mode: "auto"` (from a run against an in-memory database adapter that records what it is asked to execute):
+
+| Operation | Policy | Outcome | Sent to the database |
+|---|---|---|---|
+| `DELETE FROM users` | denied, CRITICAL | aborted at gate 2 | nothing |
+| `SELECT 1; DROP TABLE users` | denied, CRITICAL (2 statements) | aborted at gate 2 | nothing |
+| `DROP TABLE users` | requires approval, CRITICAL | rejected at gate 4 (auto mode never approves CRITICAL) | nothing |
+| `UPDATE users SET active = false WHERE id = 42` | dry-run required, MEDIUM | dry-run, auto-approved, executed | the UPDATE |
+| `SELECT id FROM users WHERE id = 1` | allowed, LOW | executed | the SELECT |
+
+### Policy rules
+
+Rules live in a JSON file validated against [schemas/policy.schema.json](schemas/policy.schema.json). From `config/default-policy.json`:
+
+```json
+{
+  "id": "deny-delete-no-where",
+  "description": "Deny DELETE without WHERE clause — too dangerous",
+  "match": { "operationType": ["DELETE"], "hasWhereClause": false },
+  "action": "deny",
+  "riskLevel": "CRITICAL",
+  "message": "DELETE without WHERE clause is not allowed. Add a WHERE condition or use TRUNCATE with explicit approval."
+}
+```
+
+All matching rules apply: risk only escalates, any `deny` wins, and CRITICAL always forces dry-run plus approval.
+
+### Other domains
+
+`SafeExecutor` builds the SQL adapter from `config.database`. To drive another system, pass an object implementing `SafeAdapter` (`domain`, `ping`, `parseIntent`, `sandbox`, `execute`, `close`) as `options.adapter`. The package exports `SQLAdapter`, `CloudAdapter`, `KubernetesAdapter`, `FilesystemAdapter`, `SecretsAdapter` and `GitAdapter`; the non-SQL adapters run their CLI through child processes. Two caveats: the policy schema matches on SQL operation types, so a non-SQL adapter needs a policy written for the intent types it emits, and the config schema still requires a `database` block.
+
+---
+
+## MCP server
+
+The MCP server exposes the domain parsers as analysis tools. It **does not execute anything**: it tells the calling agent whether a command should run.
 
 ```bash
-npx safe-executor-mcp
+npm run build
+node dist/bin/safe-executor-mcp.js      # MCP over stdio
 ```
 
-**Available MCP tools:**
-
-| Tool | Description |
-|---|---|
-| `safe_execute` | Execute an operation through the full safety pipeline |
-| `safe_analyze` | Analyze an operation and return risk assessment without executing |
-| `safe_policy_check` | Check if an operation would be allowed under current policy |
-
-Add to your MCP config:
+Register it with Claude Code in `.mcp.json` (absolute path to your checkout):
 
 ```json
 {
   "mcpServers": {
     "safe-executor": {
-      "command": "npx",
-      "args": ["safe-executor-mcp"]
+      "command": "node",
+      "args": ["/path/to/SafeExecutor/dist/bin/safe-executor-mcp.js"]
     }
   }
 }
 ```
 
-### Option 3 — NPM Package
+| Tool | Returns |
+|---|---|
+| `safe_execute` | `domain, operation, targets, riskLevel, blocked, reason, segments, policy_decision`. Despite the name, it only classifies. |
+| `safe_analyze` | Same, plus `note: "Analysis only — no execution performed"` |
+| `safe_policy_check` | `{ allowed, risk, domain, reason }` |
+
+How a command is judged:
+
+- **Shell structure first.** Unquoted `&&`, `||`, `;`, `|`, `&` and newlines split the command; `sudo`, `doas`, `env`, `nohup`, `time`, `exec`, `nice` and `VAR=value` prefixes are peeled off; `sh/bash -c '…'` and `env -S` scripts are expanded; `psql -c` / `mysql -e` payloads go to the SQL parser. Every segment is analyzed and the worst one decides.
+- **Fail-closed.** A segment no parser recognizes is `BLOCKED`, as is a parser error, command substitution (`$(…)`, backticks, `<(…)`), or shell nesting deeper than 4 levels.
+- **HIGH and CRITICAL are blocked.** LOW and MEDIUM are allowed.
+- **The `domain` argument can only add scrutiny.** The auto-detected domain is always evaluated too, so `safe_execute("rm -rf /", domain: "sql")` is still blocked.
+
+Verdicts from `safe_execute`:
+
+| Command | Verdict |
+|---|---|
+| `sudo rm -rf /` · `cd /tmp && rm -rf /` · `bash -c "rm -rf /"` | BLOCKED, CRITICAL (filesystem) |
+| `psql -c "DROP TABLE users"` · `SELECT 1; DROP TABLE users` | BLOCKED, CRITICAL (sql) |
+| `python3 -c "import shutil; shutil.rmtree('/')"` · `ls -la` | BLOCKED, HIGH (unrecognized) |
+| `git push --force origin main` · `kubectl delete namespace production` · `terraform destroy` | BLOCKED, CRITICAL |
+| `docker run --privileged -v /:/host alpine` · `iptables -F` · `redis-cli FLUSHALL` | BLOCKED, CRITICAL |
+| `git status` · `kubectl get pods` · `aws s3 ls` · `SELECT id FROM users WHERE id = 1` | ALLOWED, LOW |
+
+Reproduce any line after a build:
 
 ```bash
-npm install safe-executor
+node --input-type=module -e "import { safePolicyCheck } from './dist/mcp-server/tools.js'; console.log(await safePolicyCheck('cd /tmp && rm -rf /'))"
 ```
 
-```typescript
-import { SafeExecutor } from 'safe-executor';
+### Claude Code plugin: advisory, not enforcement
 
-const executor = new SafeExecutor({
-  adapters: ['sql', 'filesystem', 'git'],
-  policy: 'strict',
-  audit: true,
-});
+`plugin/` contains `manifest.json` (points an MCP client at `dist/bin/safe-executor-mcp.js`) and `SKILL.md` (tells the model to call `safe_analyze` before destructive commands and to stop on `BLOCKED`). This is guidance for the model: nothing prevents it from running a command without calling the tool.
 
-const result = await executor.execute({
-  type: 'sql',
-  operation: 'DELETE FROM users',
-  context: { environment: 'production' },
-});
+### Claude Code PreToolUse hook: enforcement
 
-// result.allowed === false
-// result.reason === 'DELETE without WHERE clause is not allowed in production'
-```
-
----
-
-## Quick Start Examples
-
-### Blocking a dangerous SQL query
-
-```typescript
-const result = await executor.execute({
-  type: 'sql',
-  operation: 'TRUNCATE TABLE orders',
-  context: { environment: 'production', database: 'neubooks' },
-});
-
-console.log(result);
-// {
-//   allowed: false,
-//   risk: 'critical',
-//   reason: 'TRUNCATE is not allowed — use DELETE with WHERE or archive pattern',
-//   adapter: 'sql',
-//   duration: 0.28
-// }
-```
-
-### Analyzing a Kubernetes operation
-
-```typescript
-const analysis = await executor.analyze({
-  type: 'kubernetes',
-  operation: 'kubectl delete namespace staging',
-  context: { cluster: 'prod-eu-west' },
-});
-
-console.log(analysis.riskLevel);    // 'high'
-console.log(analysis.matchedRules); // ['no-namespace-delete-prod', ...]
-```
-
-### Checking policy before acting
-
-```typescript
-const check = await executor.policyCheck({
-  type: 'git',
-  operation: 'git push --force origin main',
-});
-
-console.log(check.allowed);   // false
-console.log(check.blockedBy); // 'no-force-push-protected-branches'
-```
-
-### MCP usage (Claude Code)
-
-```
-User:   Delete all test records from the users table in production
-
-Claude: I'll use safe_analyze first to assess the risk.
-
-        [safe_analyze] → risk: critical, blocked: DELETE without WHERE
-
-        This operation is blocked. The SQL adapter requires a WHERE clause
-        for all DELETE statements in production. Should I scope it to a
-        specific condition?
-```
-
----
-
-## Configuration
-
-### Policy file (`safe-executor.config.json`)
+`dist/bin/safe-executor-hook.js` runs the same analysis on every Bash call before it executes, so the verdict no longer depends on the model choosing to ask. Add to `.claude/settings.json`:
 
 ```json
 {
-  "adapters": {
-    "sql": {
-      "enabled": true,
-      "strictMode": true,
-      "allowedEnvironments": ["development", "staging"],
-      "rules": {
-        "no-delete-without-where": "block",
-        "no-drop-table": "block",
-        "no-truncate": "block",
-        "select-row-limit": "warn"
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "node /path/to/SafeExecutor/dist/bin/safe-executor-hook.js" }]
       }
-    },
-    "git": {
-      "enabled": true,
-      "protectedBranches": ["main", "master", "production"],
-      "rules": {
-        "no-force-push-protected": "block",
-        "no-reset-hard-shared": "block"
-      }
-    },
-    "kubernetes": {
-      "enabled": true,
-      "productionNamespaces": ["prod", "production", "prod-*"],
-      "rules": {
-        "no-delete-namespace": "block",
-        "no-scale-to-zero-prod": "block",
-        "no-exec-prod": "require-approval"
-      }
-    }
-  },
-  "global": {
-    "auditLog": true,
-    "auditPath": "./logs/safe-executor-audit.jsonl",
-    "approvalWebhook": "https://your-approval-endpoint/approve",
-    "defaultRisk": "warn"
+    ]
   }
 }
 ```
 
-### Rule severity levels
+| Verdict | Hook output | Effect |
+|---|---|---|
+| CRITICAL | `permissionDecision: "deny"` | The command does not run; the reason is shown to the model |
+| Other BLOCKED (HIGH, unrecognized, unanalyzable) | `permissionDecision: "ask"` | A human confirms or rejects |
+| ALLOWED | no output | Claude Code's normal permission rules apply |
+| Malformed input or internal error | `permissionDecision: "deny"` | Fail-closed |
 
-| Level | Behavior |
-|---|---|
-| `block` | Operation rejected immediately with reason |
-| `warn` | Operation proceeds, warning logged to audit trail |
-| `require-approval` | Operation queued, waits for human approval via webhook |
-| `allow` | Operation proceeds silently |
-
-### Environment-aware policies
-
-Rules can be scoped to environments:
-
-```json
-{
-  "rules": {
-    "no-truncate": {
-      "production": "block",
-      "staging": "warn",
-      "development": "allow"
-    }
-  }
-}
-```
+The hook never answers `allow`, so it can only tighten permissions. Bash input is always treated as a shell command line, even when it looks like SQL (`SELECT 'a' || rm -rf /` is denied). In a `claude -p` session with Bash pre-approved (`--allowedTools Bash`), the hook still stopped `rm -rf` on a canary directory. The trade-off is friction: every unrecognized command (`ls`, `cat`, `npm test`) triggers a confirmation prompt.
 
 ---
 
 ## Performance
 
-Measured on Apple M-series hardware:
+From [BENCHMARK_REPORT.md](BENCHMARK_REPORT.md): a single run on 2026-03-28, Apple M2, against a remote Supabase PostgreSQL, 15 runs per case.
 
-| Metric | Value |
+| Path | Cost |
 |---|---|
-| Business logic overhead | **0.30ms** |
-| Throughput (blocking dangerous commands) | **7273 req/s** |
-| Test suite | **1,279 tests passing** |
-| Policy rules | **~100 across all adapters** |
+| Refused at the policy gate (e.g. `DELETE` without `WHERE`) | **0.12 ms** mean; no database round-trip after the gate |
+| In-process gates (parse + policy + approval + audit) on any path | **~0.30 ms** |
+| Allowed `SELECT`, end-to-end vs a direct `pg` query | **+81 ms**, dominated by 3 extra transaction round-trips (BEGIN, SAVEPOINT, COMMIT) at ~90 ms RTT |
+
+The throughput figure in the report (7,273 req/s) measures 20 refusals only, not executed operations. `tests/benchmark.ts` predates the `SafeAdapter` refactor and no longer compiles against the current API; treat these numbers as indicative until it is updated.
 
 ---
 
-## Architecture
+## Limitations
+
+- **Not on npm.** Install from source as above.
+- **MCP analysis is advisory**; only the PreToolUse hook enforces it, and only for Claude Code's Bash tool.
+- **Fail-closed has a cost.** The MCP tools block every command they do not recognize, including harmless ones (`ls`, `cat`, `npm test`); the hook turns those into confirmation prompts.
+- **Command substitution is opaque.** `$(…)` and backticks are flagged, never inspected, so the hook asks rather than denies even when the hidden command is destructive.
+- **Parsers are heuristics.** Examples: `aws secretsmanager get-secret-value --secret-id prod/db` is classified LOW and allowed; `kafka-topics.sh --list` is classified HIGH and blocked.
+- **Library pipeline is SQL-first.** See [Other domains](#other-domains). `database.allowedTables` / `blockedTables` are accepted by the config schema but not enforced yet.
+
+---
+
+## Project layout
 
 ```
 src/
-├── core/
-│   ├── executor.ts          # Main SafeExecutor class
-│   ├── pipeline.ts          # 6-gate pipeline orchestration
-│   ├── policy-engine.ts     # Rule evaluation engine
-│   └── audit.ts             # Audit trail writer
+├── index.ts                 # SafeExecutor class + public exports
+├── core/                    # pipeline.ts, policy-engine.ts, approval-gate.ts, audit.ts
+├── config/loader.ts         # JSON Schema validation, ${ENV_VAR} resolution
 ├── adapters/
-│   ├── sql/                 # AST-based SQL analysis
-│   ├── cloud/               # Terraform/AWS/GCP/Azure
-│   ├── kubernetes/          # kubectl/Helm
-│   ├── filesystem/          # Shell command analysis
-│   ├── cicd/                # Docker/GitHub Actions
-│   ├── api/                 # REST/HTTP
-│   ├── secrets/             # Vault/AWS SM/SSM/GCP/Azure KV
-│   ├── git/                 # Git operations
-│   ├── network/             # iptables/ufw/routes
-│   └── queue/               # Kafka/RabbitMQ/Redis/SQS
-├── mcp-server/
-│   └── server.ts            # MCP server (safe_execute, safe_analyze, safe_policy_check)
-└── plugin/                  # Claude Code plugin (manifest.json + SKILL.md)
+│   ├── adapter.interface.ts # SafeAdapter, DatabaseAdapter
+│   ├── sql/                 # AST parser, sandbox, executor, PostgreSQL driver
+│   └── <domain>/            # parser, sandbox, adapter for cloud, kubernetes, filesystem,
+│                            # git, secrets, cicd, network, queue, api
+├── mcp-server/              # index.ts (server), tools.ts, auto-detect.ts, command-segments.ts
+├── hooks/pre-tool-use.ts    # Claude Code PreToolUse decision
+└── bin/                     # safe-executor-mcp.ts (MCP over stdio), safe-executor-hook.ts (hook entry)
+config/                      # default-policy.json, policies/<domain>-default-policy.json, example configs
+schemas/                     # config, policy and audit JSON Schemas
+plugin/                      # manifest.json + SKILL.md
+tests/                       # Jest suites (*.test.ts); e2e-neubooks.ts and benchmark.ts need a live database
 ```
 
----
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feat/my-adapter`
-3. Add your adapter in `src/adapters/your-domain/`
-4. Follow the existing adapter interface:
-
-```typescript
-export interface Adapter {
-  name: string;
-  analyze(operation: Operation, context: Context): Promise<AnalysisResult>;
-  execute(operation: Operation, context: Context): Promise<ExecutionResult>;
-}
-```
-
-5. Add tests — the bar is high (existing suite: 1,279 tests)
-6. Open a PR against `main`
-
-### Adding a new policy rule
-
-Rules live in `src/adapters/<domain>/rules/`. Each rule is a function:
-
-```typescript
-export const noDeleteWithoutWhere: Rule = {
-  id: 'no-delete-without-where',
-  description: 'DELETE statements must include a WHERE clause',
-  severity: 'block',
-  match: (op: ParsedSQL) => op.type === 'delete' && !op.where,
-  reason: (op: ParsedSQL) => `DELETE on ${op.table} without WHERE would affect all rows`,
-};
-```
+Database-backed scripts read the connection string from `SAFE_EXECUTOR_DATABASE_URL`; no credential is stored in the repository.
 
 ---
 

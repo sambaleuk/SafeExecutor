@@ -35,7 +35,7 @@
 | OS | Darwin 25.4.0 (arm64) |
 | CPU | Apple M2 (8 cores) |
 | RAM | 16.0 GB |
-| Database | db.oslhwchaxstnloixpgxc.supabase.co:6543 (Supabase/PostgreSQL) |
+| Database | remote Supabase/PostgreSQL (host redacted) |
 | Runs per test | 15 (+ 1 warm-up) |
 | Approval mode | auto (no interactive prompts) |
 

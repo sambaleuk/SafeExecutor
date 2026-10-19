@@ -4,7 +4,7 @@
   "executor": "e2e-test-runner",
   "database": {
     "adapter": "postgres",
-    "connectionString": "postgresql://postgres:FAanl100921%21@db.oslhwchaxstnloixpgxc.supabase.co:6543/postgres",
+    "connectionString": "${SAFE_EXECUTOR_DATABASE_URL}",
     "schema": "public",
     "allowedTables": [
       "user_profiles",
@@ -34,6 +34,6 @@
   "audit": {
     "enabled": true,
     "output": "file",
-    "filePath": "./logs/neubooks-e2e-audit.log"
+    "filePath": "./logs/e2e-audit.log"
   }
 }

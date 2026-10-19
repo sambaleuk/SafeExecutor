@@ -3,8 +3,8 @@
 
 **Date:** 2026-03-28
 **Tester:** e2e-test-runner (automated)
-**Database:** NeuBooks Supabase/PostgreSQL (`db.oslhwchaxstnloixpgxc.supabase.co:6543`)
-**Config:** `config/neubooks-test.json`
+**Database:** NeuBooks Supabase/PostgreSQL (host redacted)
+**Config:** local config (removed from the repo; the e2e suite now uses `config/e2e-test.json` with the connection string read from `SAFE_EXECUTOR_DATABASE_URL`)
 **Policy:** `config/default-policy.json`
 **Approval mode:** `auto`
 

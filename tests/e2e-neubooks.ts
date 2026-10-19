@@ -10,7 +10,10 @@
  * Usage:
  *   npm run build
  *   npx tsc -p tsconfig.test.json
- *   node dist-test/e2e-neubooks.js
+ *   SAFE_EXECUTOR_DATABASE_URL=postgresql://... node dist-test/e2e-neubooks.js
+ *
+ * The connection string is read from SAFE_EXECUTOR_DATABASE_URL through the
+ * `${SAFE_EXECUTOR_DATABASE_URL}` reference in config/e2e-test.json.
  *
  * Safety guarantee:
  *   - Destructive operations (Level 3) NEVER reach Gate 5 (Executor)
@@ -49,7 +52,7 @@ interface TestRun {
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const CONFIG_PATH = './config/neubooks-test.json';
+const CONFIG_PATH = './config/e2e-test.json';
 
 // Safe zero-UUID: guaranteed to not exist in any NeuBooks table
 const ZERO_UUID = '00000000-0000-0000-0000-000000000000';
@@ -348,7 +351,7 @@ async function main(): Promise<void> {
   console.log('  SafeExecutor — E2E Test Suite against NeuBooks Production');
   console.log(`  Date    : ${new Date().toISOString()}`);
   console.log(`  Config  : ${CONFIG_PATH}`);
-  console.log(`  DB      : db.oslhwchaxstnloixpgxc.supabase.co:6543 (Supabase/PostgreSQL)`);
+  console.log('  DB      : remote Supabase/PostgreSQL (from SAFE_EXECUTOR_DATABASE_URL)');
   console.log(sep('═'));
 
   let executor: SafeExecutor | null = null;

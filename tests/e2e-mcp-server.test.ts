@@ -399,15 +399,17 @@ describe('safe_execute — return structure', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('domain override', () => {
-  test('explicit domain overrides auto-detect', async () => {
+  test('domain override cannot downgrade the auto-detected verdict', async () => {
     // 'rm -rf /' normally detects as 'filesystem'.
     expect(detectDomain('rm -rf /')).toBe('filesystem');
 
-    // Force SQL parsing — the SQL parser will attempt to parse 'rm -rf /'
-    // as SQL. It will either throw (and fallback to regex) or produce a
-    // result with domain='sql'.
+    // The SQL parser alone would classify 'rm -rf /' as LOW. The auto-detected
+    // filesystem analysis is always evaluated too, so the override cannot
+    // be used to slip a destructive command past the check.
     const r = await safeExecute('rm -rf /', 'sql');
-    expect(r.domain).toBe('sql');
+    expect(r.domain).toBe('filesystem');
+    expect(r.riskLevel).toBe('CRITICAL');
+    expect(r.blocked).toBe(true);
   });
 
   test('SELECT 1 forced to filesystem domain', async () => {
@@ -419,14 +421,13 @@ describe('domain override', () => {
     expect(r.domain).toBe('filesystem');
   });
 
-  test('override to unknown domain hits default branch', async () => {
+  test('override to unknown domain hits default branch and fails closed', async () => {
     const r = await safeExecute('SELECT 1', 'nonexistent');
     expect(r.domain).toBe('nonexistent');
     expect(r.operation).toBe('unknown');
-    // default case returns 'unknown' as RiskLevel
-    expect(r.riskLevel).toBe('unknown');
-    expect(r.blocked).toBe(false);
-    expect(r.reason).toBe('No parser available for this domain');
+    expect(r.riskLevel).toBe('HIGH');
+    expect(r.blocked).toBe(true);
+    expect(r.reason).toMatch(/^No parser available for this domain/);
   });
 
   test('safeAnalyze respects domain override to a compatible parser', async () => {
@@ -436,12 +437,13 @@ describe('domain override', () => {
     expect(r.note).toBe('Analysis only — no execution performed');
   });
 
-  test('overriding to cloud with incompatible CLI throws', async () => {
-    // The cloud parser only supports terraform/aws/gcloud/az and will
-    // throw for kubectl.
-    await expect(safeAnalyze('kubectl get pods', 'cloud')).rejects.toThrow(
-      /Unsupported cloud CLI/,
-    );
+  test('overriding to cloud with incompatible CLI blocks instead of throwing', async () => {
+    // The cloud parser only supports terraform/aws/gcloud/az and throws for
+    // kubectl. A parser error must fail closed, not surface as a tool error.
+    const r = await safeAnalyze('kubectl get pods', 'cloud');
+    expect(r.domain).toBe('cloud');
+    expect(r.blocked).toBe(true);
+    expect(r.reason).toMatch(/Unsupported cloud CLI/);
   });
 
   test('safePolicyCheck does NOT accept domain override (always auto-detects)', async () => {
@@ -461,7 +463,7 @@ describe('error handling — edge cases', () => {
       const r = await safeExecute('');
       expect(r.domain).toBe('unknown');
       expect(r.operation).toBe('unknown');
-      expect(r.blocked).toBe(false);
+      expect(r.blocked).toBe(true);
     });
 
     test('safeAnalyze with empty string falls to unknown domain', async () => {
@@ -474,7 +476,7 @@ describe('error handling — edge cases', () => {
     test('safePolicyCheck with empty string returns unknown domain', async () => {
       const r = await safePolicyCheck('');
       expect(r.domain).toBe('unknown');
-      expect(r.allowed).toBe(true);
+      expect(r.allowed).toBe(false);
     });
   });
 
@@ -511,16 +513,18 @@ describe('error handling — edge cases', () => {
     });
 
     test('command with shell metacharacters', async () => {
+      // $(...) runs a command the analyzer cannot see — blocked outright.
       const cmd = 'rm -rf /tmp/$(whoami)';
       const r = await safeExecute(cmd);
-      expect(r.domain).toBe('filesystem');
-      expect(r).toHaveProperty('blocked');
+      expect(r.blocked).toBe(true);
+      expect(r.reason).toMatch(/Command substitution/);
     });
 
     test('command with backtick injection', async () => {
       const cmd = 'rm -rf /tmp/`cat /etc/passwd`';
       const r = await safeExecute(cmd);
-      expect(r.domain).toBe('filesystem');
+      expect(r.blocked).toBe(true);
+      expect(r.reason).toMatch(/Command substitution/);
     });
 
     test('command with newlines', async () => {
@@ -661,7 +665,8 @@ describe('safeAnalyze vs safeExecute — consistency', () => {
     const execute = await safeExecute(cmd, 'nonexistent');
 
     expect(analyze.domain).toBe(execute.domain);
-    expect(analyze.domain).toBe('nonexistent');
+    // The auto-detected filesystem verdict (CRITICAL) outranks the override.
+    expect(analyze.domain).toBe('filesystem');
     expect(analyze.operation).toBe(execute.operation);
     expect(analyze.blocked).toBe(execute.blocked);
     expect(analyze.policy_decision).toBe(execute.policy_decision);
