@@ -158,7 +158,33 @@ node --input-type=module -e "import { safePolicyCheck } from './dist/mcp-server/
 
 ### Claude Code plugin: advisory, not enforcement
 
-`plugin/` contains `manifest.json` (points an MCP client at `dist/bin/safe-executor-mcp.js`) and `SKILL.md` (tells the model to call `safe_analyze` before destructive commands and to stop on `BLOCKED`). This is guidance for the model: nothing prevents it from running a command without calling the tool. Enforcement before execution needs a Claude Code `PreToolUse` hook.
+`plugin/` contains `manifest.json` (points an MCP client at `dist/bin/safe-executor-mcp.js`) and `SKILL.md` (tells the model to call `safe_analyze` before destructive commands and to stop on `BLOCKED`). This is guidance for the model: nothing prevents it from running a command without calling the tool.
+
+### Claude Code PreToolUse hook: enforcement
+
+`dist/bin/safe-executor-hook.js` runs the same analysis on every Bash call before it executes, so the verdict no longer depends on the model choosing to ask. Add to `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "node /path/to/SafeExecutor/dist/bin/safe-executor-hook.js" }]
+      }
+    ]
+  }
+}
+```
+
+| Verdict | Hook output | Effect |
+|---|---|---|
+| CRITICAL | `permissionDecision: "deny"` | The command does not run; the reason is shown to the model |
+| Other BLOCKED (HIGH, unrecognized, unanalyzable) | `permissionDecision: "ask"` | A human confirms or rejects |
+| ALLOWED | no output | Claude Code's normal permission rules apply |
+| Malformed input or internal error | `permissionDecision: "deny"` | Fail-closed |
+
+The hook never answers `allow`, so it can only tighten permissions. Bash input is always treated as a shell command line, even when it looks like SQL (`SELECT 'a' || rm -rf /` is denied). In a `claude -p` session with Bash pre-approved (`--allowedTools Bash`), the hook still stopped `rm -rf` on a canary directory. The trade-off is friction: every unrecognized command (`ls`, `cat`, `npm test`) triggers a confirmation prompt.
 
 ---
 
@@ -179,8 +205,9 @@ The throughput figure in the report (7,273 req/s) measures 20 refusals only, not
 ## Limitations
 
 - **Not on npm.** Install from source as above.
-- **MCP analysis is advisory** unless a pre-execution hook enforces it; the plugin alone does not.
-- **Fail-closed has a cost.** The MCP tools block every command they do not recognize, including harmless ones (`ls`, `cat`, `npm test`).
+- **MCP analysis is advisory**; only the PreToolUse hook enforces it, and only for Claude Code's Bash tool.
+- **Fail-closed has a cost.** The MCP tools block every command they do not recognize, including harmless ones (`ls`, `cat`, `npm test`); the hook turns those into confirmation prompts.
+- **Command substitution is opaque.** `$(…)` and backticks are flagged, never inspected, so the hook asks rather than denies even when the hidden command is destructive.
 - **Parsers are heuristics.** Examples: `aws secretsmanager get-secret-value --secret-id prod/db` is classified LOW and allowed; `kafka-topics.sh --list` is classified HIGH and blocked.
 - **Library pipeline is SQL-first.** See [Other domains](#other-domains). `database.allowedTables` / `blockedTables` are accepted by the config schema but not enforced yet.
 
@@ -199,7 +226,8 @@ src/
 │   └── <domain>/            # parser, sandbox, adapter for cloud, kubernetes, filesystem,
 │                            # git, secrets, cicd, network, queue, api
 ├── mcp-server/              # index.ts (server), tools.ts, auto-detect.ts, command-segments.ts
-└── bin/safe-executor-mcp.ts # stdio entry point → dist/bin/safe-executor-mcp.js
+├── hooks/pre-tool-use.ts    # Claude Code PreToolUse decision
+└── bin/                     # safe-executor-mcp.ts (MCP over stdio), safe-executor-hook.ts (hook entry)
 config/                      # default-policy.json, policies/<domain>-default-policy.json, example configs
 schemas/                     # config, policy and audit JSON Schemas
 plugin/                      # manifest.json + SKILL.md

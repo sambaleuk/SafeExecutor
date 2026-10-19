@@ -194,11 +194,12 @@ async function analyzeSegment(segment: CommandSegment, domainOverride?: string):
   return riskiest(await Promise.all(domains.map((d) => analyzeWithDomain(segment.command, d))));
 }
 
-async function analyzeCommand(command: string, domainOverride?: string) {
+async function analyzeCommand(command: string, domainOverride?: string, asShell = false) {
   // SQL text is not a shell command line: `||` is string concatenation and
-  // `;` separates statements, which the SQL parser evaluates itself.
+  // `;` separates statements, which the SQL parser evaluates itself. Input
+  // known to be a shell command (asShell) is always segmented.
   const segments: CommandSegment[] =
-    detectDomain(command) === 'sql'
+    !asShell && detectDomain(command) === 'sql'
       ? [{ command: command.trim(), domain: 'sql' }]
       : extractSegments(command ?? '');
 
@@ -210,10 +211,15 @@ async function analyzeCommand(command: string, domainOverride?: string) {
   return {
     ...riskiest(analyses),
     segments: segments.map((s, i) => {
-      const { domain, riskLevel, blocked } = analyses[i] as Analysis;
-      return { command: s.command, domain, riskLevel, blocked };
+      const { domain, riskLevel, blocked, reason } = analyses[i] as Analysis;
+      return { command: s.command, domain, riskLevel, blocked, reason };
     }),
   };
+}
+
+/** Analysis of a command line that will be run by a shell (e.g. Claude Code's Bash tool). */
+export async function analyzeShellCommand(command: string) {
+  return analyzeCommand(command, undefined, true);
 }
 
 // ─── Tool Handlers ───────────────────────────────────────────────────────────

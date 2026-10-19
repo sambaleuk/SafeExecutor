@@ -6,7 +6,8 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "safe-executor-mcp": "./dist/bin/safe-executor-mcp.js"
+    "safe-executor-mcp": "./dist/bin/safe-executor-mcp.js",
+    "safe-executor-hook": "./dist/bin/safe-executor-hook.js"
   },
   "exports": {
     ".": {
