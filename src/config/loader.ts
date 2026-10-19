@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Ajv } from 'ajv';
-import type { ErrorObject } from 'ajv';
+import type { ErrorObject, ValidateFunction } from 'ajv';
 import type { SafeExecutorConfig, Policy } from '../types/index.js';
 
 /**
@@ -16,12 +16,26 @@ import type { SafeExecutorConfig, Policy } from '../types/index.js';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 
+// AJV registers each schema under its $id, so compiling the same schema twice
+// throws. Validators are compiled once per schema file and reused.
+const validators = new Map<string, ValidateFunction>();
+
 function loadSchema(schemaPath: string): object {
   const resolved = path.resolve(schemaPath);
   if (!fs.existsSync(resolved)) {
     throw new Error(`Schema not found: ${resolved}`);
   }
   return JSON.parse(fs.readFileSync(resolved, 'utf-8'));
+}
+
+function getValidator(schemaFile: string): ValidateFunction {
+  const cached = validators.get(schemaFile);
+  if (cached) return cached;
+
+  const schemaDir = path.join(path.dirname(new URL(import.meta.url).pathname), '../../schemas');
+  const validate = ajv.compile(loadSchema(path.join(schemaDir, schemaFile)));
+  validators.set(schemaFile, validate);
+  return validate;
 }
 
 function loadJson<T>(filePath: string): T {
@@ -35,10 +49,7 @@ function loadJson<T>(filePath: string): T {
 export function loadConfig(configPath: string): SafeExecutorConfig {
   const config = loadJson<SafeExecutorConfig>(configPath);
 
-  const schemaDir = path.join(path.dirname(new URL(import.meta.url).pathname), '../../schemas');
-  const schema = loadSchema(path.join(schemaDir, 'config.schema.json'));
-
-  const validate = ajv.compile(schema);
+  const validate = getValidator('config.schema.json');
   if (!validate(config)) {
     const errors = validate.errors?.map((e: ErrorObject) => `  ${e.instancePath} ${e.message}`).join('\n');
     throw new Error(`Invalid config at ${configPath}:\n${errors}`);
@@ -50,10 +61,7 @@ export function loadConfig(configPath: string): SafeExecutorConfig {
 export function loadPolicy(policyPath: string): Policy {
   const policy = loadJson<Policy>(policyPath);
 
-  const schemaDir = path.join(path.dirname(new URL(import.meta.url).pathname), '../../schemas');
-  const schema = loadSchema(path.join(schemaDir, 'policy.schema.json'));
-
-  const validate = ajv.compile(schema);
+  const validate = getValidator('policy.schema.json');
   if (!validate(policy)) {
     const errors = validate.errors?.map((e: ErrorObject) => `  ${e.instancePath} ${e.message}`).join('\n');
     throw new Error(`Invalid policy at ${policyPath}:\n${errors}`);
